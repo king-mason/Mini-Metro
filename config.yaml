@@ -1,0 +1,67 @@
+# config.yaml
+
+resolution: [1512, 885]
+
+paths:
+  screenshots: "screenshots/"
+  save_output: "output/"
+
+colors:
+  background: [255, 255, 255]
+  station_highlight: [0, 255, 255]
+
+thresholds:
+  station_detection: 20
+  mask_buffer: 5
+
+stations:
+  radius: 15
+  capacity: 12
+  max_overcrowd_ticks: 100
+
+passengers:
+  spawn_chance_init: 0.2
+  spawn_chance_max: 0.95
+  spawn_chance_growth: 1000    # characteristic growth (ticks at time_scale=1); ~76% of the way to max at this point
+  spawn_interval_max: 200      # ceiling interval (ticks at time_scale=1)
+  spawn_interval_min: 30       # floor — hardest steady-state difficulty
+  spawn_decay: 0.01             # max decay rate scale
+  rest_duration: 200       # ticks at time_scale=1 before a delivered passenger re-enters the queue
+  rest_duration_randomness: 50
+
+trains:
+  speed: 10.0      # pixels per tick at time_scale=1
+  max_per_line: 4  
+  total: 10   # train pool: agent must choose which lines deserve more trains
+
+lines:
+  max: 4
+
+# All reward / cost coefficients in one place. Two families:
+#   return signals  — actual outcomes the agent should care about (delivery, failure)
+#   shaping signals — small per-action nudges that bias structural choices
+rewards:
+  # return signals (per delivered passenger / per failure)
+  delivery: 0.2              # base reward when a passenger reaches its destination
+  speed_bonus_max: 0.8       # max additional reward for fast delivery (decays with wait)
+  failure_blame: 50.0       # total negative reward distributed across actions on overcrowd loss
+  overcrowd_penalty: 1.0     # per-tick penalty for each half-full station (sim-level, display only)
+  overcrowd_blame: 0.02      # per-tick causal blame routed to lines serving an overcrowded station
+  transfer_penalty: 0.1      # subtracted from a delivered passenger's reward pool per line-transfer
+
+  # congestion (analytic queueing signal, computed at design time)
+  congestion_penalty: 30.0   # penalty for EXTEND/NEW_LINE leaving a station's load factor above 1
+  congestion_relief: 30.0    # reward for ADD_TRAIN reducing a line's worst-station load factor
+
+  # shaping signals (structural rewards for design-phase actions)
+  isolation_bonus: 1.0       # connecting a previously-isolated station
+  reach_demand: 5.0         # scales expected_demand_gain for both endpoints
+  reach_coverage: 50.0        # scales coverage_gain (new types reachable network-wide)
+  scarcity_bonus: 1.0        # bonus for connecting awkward / geometrically-isolated stations
+  crossing_penalty: 1000.0      # per line-crossing
+  bend_penalty: 1000.0                # scales bend at junction on EXTEND_LINE: 0 (straight) → 1 (U-turn)
+  connection_cost_scale: 4.0       # base scale for line-length cost
+  connection_cost_curvature: 100.0   # quadratic term: cost = scale * (norm + curvature * norm²)
+  add_train_bonus: 10.0        # ADD_TRAIN bonus per station reduced by number of trains on line
+
+time_scale: 3  # multiplier: trains faster, spawning/decisions more frequent
