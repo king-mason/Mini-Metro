@@ -30,8 +30,6 @@ class Passenger:
     def __init__(self, target_type: StationType, journey_start_time: int = 0):
         self.target_type = target_type
         self.journey_start_time = journey_start_time
-        self.lines_ridden = set()
-        self.trains_ridden = set()
         self.rest_until: int = -1  # tick when passenger re-enters waiting; -1 = active
         # Cached shortest-path distances to nearest target-type station, computed lazily
         # on first boarding decision. Maps id(station) → distance. {} means not computed;
@@ -42,8 +40,6 @@ class Passenger:
         """Called when passenger re-emerges from rest with a new destination."""
         self.target_type = new_target
         self.journey_start_time = current_time
-        self.lines_ridden = set()
-        self.trains_ridden = set()
         self.rest_until = -1
         self._dist_to_target = None  # invalidate route for new target
 
@@ -149,9 +145,9 @@ class Station:
         self.y = pos.y
         self.waiting: deque = deque()
         self.resting: deque = deque()  # passengers serving their rest period after delivery
-        self.overcrowding_ticks = 0
 
-    def spawn_passenger(self, station_type_options: list, weights: list | None = None, current_time: int = 0):
+    def spawn_passenger(self, station_type_options: list, weights: list | None = None, current_time: int = 0,
+                        rng=random):
         other_type_options = []
         if weights is None:
             weights = [1 for _ in range(len(station_type_options))]
@@ -162,17 +158,17 @@ class Station:
                 new_weights.append(w)
         if not other_type_options:
             return
-        target = random.choices(other_type_options, new_weights)[0]
+        target = rng.choices(other_type_options, new_weights)[0]
         self.waiting.append(Passenger(target, journey_start_time=current_time))
 
-    def tick_resting(self, current_time: int, station_options: list):
+    def tick_resting(self, current_time: int, station_options: list, rng=random):
         """Move passengers whose rest period has ended back into the waiting queue."""
         still_resting = deque()
         for p in self.resting:
             if p.rest_until <= current_time:
                 options = [t for t in station_options if t != self.type]
                 if options:
-                    p.reset_for_new_journey(random.choice(options), current_time)
+                    p.reset_for_new_journey(rng.choice(options), current_time)
                     self.waiting.append(p)
                 # If no valid target (only one station type), passenger stays resting
                 # until the map has more diversity — rare but safe to skip.
@@ -196,7 +192,32 @@ class Line:
     def add_train(self, train):
         self.trains.append(train)
         train.line = self
-    
+
+    def round_trip_ticks(self) -> int:
+        """Ticks for one train to go end to end and back, stops included."""
+        if len(self.stations) < 2:
+            return 0
+        probe = Train(self)
+        ticks = 0
+        while True:
+            probe.advance(1)
+            ticks += 1
+            if probe.position == 0 and probe._at_station:
+                return ticks
+
+    def space_trains(self):
+        """Spread the trains evenly in time around the round trip (design time only: this
+        moves trains, and nothing should be on board).
+
+        Train k starts where a train leaving the first station k/T of a round trip earlier
+        would be now, so in each direction every station sees a train every round_trip / T
+        ticks. A stop always takes one tick, so the spacing set here holds all game.
+        """
+        period = self.round_trip_ticks()
+        for k, train in enumerate(self.trains):
+            train.move_to(0, 1)
+            train.advance(round(k * period / len(self.trains)))
+
     def __str__(self):
         return f"Line {self.index}"
 
@@ -240,16 +261,20 @@ class Train:
         self.progress = 0.0
         self._at_station = True
 
-    def board_passenger(self, passenger):
-        self.passengers.append(passenger)
+    def advance(self, ticks: int):
+        """Run the train's movement for `ticks` ticks without serving passengers, using the
+        same timing as step(): one tick per stop, then travel."""
+        for _ in range(ticks):
+            if self._at_station:
+                self._at_station = False
+            elif self.move():
+                self._at_station = True
 
-    SPEED_BONUS_CAP = 300
-
-    def stop_at_station(self, all_lines: list[Line], current_time: int = 0):
+    def stop_at_station(self, all_lines: list[Line]) -> int:
+        """Let passengers off and on at the current station. Returns how many arrived."""
         station = self.line.stations[self.position]
 
-        delivered_passengers: list[Passenger] = []
-        speed_bonus = 0.0
+        delivered = 0
         remaining = []
         transfers = []
         # The station this train will visit next (after the current stop).
@@ -260,9 +285,7 @@ class Train:
         # Disembark passengers whose route disagrees with this train's next stop.
         for p in self.passengers:
             if p.target_type == station.type:
-                delivered_passengers.append(p)
-                wait = current_time - p.journey_start_time
-                speed_bonus += max(0.0, 1.0 - wait / self.SPEED_BONUS_CAP)
+                delivered += 1
             elif (next_train_station is not None
                   and p.is_train_useful(station, next_train_station, all_lines)):
                 remaining.append(p)  # train continues toward target — stay on
@@ -277,8 +300,6 @@ class Train:
             if (len(self.passengers) < self.capacity
                     and next_train_station is not None
                     and p.is_train_useful(station, next_train_station, all_lines)):
-                p.lines_ridden.add(self.line)
-                p.trains_ridden.add(self)
                 self.passengers.append(p)
             else:
                 remaining_waiting.append(p)
@@ -287,16 +308,17 @@ class Train:
         for p in transfers:
             station.waiting.append(p)
 
-        return len(delivered_passengers), speed_bonus, delivered_passengers        
+        return delivered
 
-    def step(self, all_lines: list, current_time: int = 0):
+    def step(self, all_lines: list, current_time: int = 0) -> int:
+        """One tick: a stop at a station takes a tick, then the train travels. Returns how
+        many passengers it delivered."""
         if self._at_station:
             self._at_station = False
-            return self.stop_at_station(all_lines, current_time)
-        arrived = self.move()
-        if arrived:
+            return self.stop_at_station(all_lines)
+        if self.move():
             self._at_station = True
-        return 0, 0.0, []
+        return 0
 
     def __str__(self):
         return f"<Train on {self.line} @ Station {self.position} with Direction {self.direction}>"

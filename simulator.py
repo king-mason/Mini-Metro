@@ -1,11 +1,12 @@
+import copy
+import math
 import random
 from collections import Counter
-from objects import Station, Line, Train, Passenger, StationType
-from point import Point
 
 import yaml
 
-import math
+from objects import Station, Line, Train, StationType
+from point import Point
 
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
@@ -19,16 +20,14 @@ _spawn_max = max(1, config["passengers"]["spawn_interval_max"] // _time_scale)
 _spawn_min = max(1, config["passengers"]["spawn_interval_min"] // _time_scale)
 _spawn_decay = config["passengers"]["spawn_decay"] * _time_scale
 max_lines = config["lines"]["max"]
-_overcrowd_penalty = config["rewards"]["overcrowd_penalty"]
-_max_overcrowd_ticks = config["stations"]["max_overcrowd_ticks"] // _time_scale
+# The game is lost once this many station-ticks over capacity have accumulated (all
+# stations together, never reset).
+max_overcrowd_ticks = config["stations"]["max_overcrowd_ticks"] // _time_scale
 
-# def current_spawn_interval(sim_time: int) -> int:
-#     """Exponential decay toward a minimum: interval = min + (start - min) * exp(-t / decay)."""
-#     interval = _spawn_min + (_spawn_start - _spawn_min) * math.exp(-sim_time / _spawn_decay)
-#     return max(1, round(interval))
 
 def current_spawn_interval(sim_time: int) -> float:
-    """Logistic decay toward a minimum: interval = """
+    """Ticks between spawn rounds: a logistic decay from spawn_interval_max to
+    spawn_interval_min, centered after spawn chance has mostly grown."""
     diff = _spawn_max - _spawn_min
     k = 2 * _spawn_chance_growth   # set max decay time to after spawn chance has grown
     r = 4 * _spawn_decay / diff
@@ -36,36 +35,44 @@ def current_spawn_interval(sim_time: int) -> float:
     return max(1, round(interval, 2))
 
 def current_spawn_chance(sim_time: int) -> float:
-    """Logistic growth toward a maximum: chance = """
+    """Chance that a station spawns a passenger in a spawn round: grows logistically from
+    spawn_chance_init toward spawn_chance_max."""
     diff = _spawn_chance_max - _spawn_chance_start
     return _spawn_chance_start + diff * (2 / (1 + math.exp(-2 * sim_time / _spawn_chance_growth)) - 1)
 
 
-# TODO
-
-
-
 class MiniMetroSim:
-    def __init__(self, num_stations=5):
-        self.stations: list[Station] = self.get_new_stations(num_stations)
+    def __init__(self, num_stations=5, map_seed=None, passenger_seed=None):
+        """map_seed fixes the station layout; passenger_seed fixes spawning.
+
+        Each sim owns its RNGs, so nothing else that draws random numbers (exploration,
+        search) can shift the passenger stream. map_seed=None falls back to the global
+        `random` module for the layout, matching the old random.seed(...) call pattern.
+        """
+        map_rng = random.Random(map_seed) if map_seed is not None else random
+        self.stations: list[Station] = self.get_new_stations(num_stations, rng=map_rng)
+        self.rng = random.Random(passenger_seed)
         self.lines: list[Line] = []
         self.time = 0
         self.spawn_interval = current_spawn_interval(0)
         self.last_spawned_at = 0
         self.delivered = 0
-        self.overcrowing_ticks = 0
+        self.overcrowded_ticks = 0
         self.failed = False
-    
-    def get_new_stations(self, num_stations: int):
+
+    def set_passenger_seed(self, seed):
+        """Reseed spawning. Deep copies share RNG state, so reseed each play-out copy."""
+        self.rng.seed(seed)
+
+    def get_new_stations(self, num_stations: int, rng=random):
+        """Place stations on distinct points of a grid (spacing 4 station radii) covering the
+        middle 80% x 60% of the screen. Every 10th station gets a rare shape."""
         station_positions = []
         station_radius = config["stations"]["radius"]
-        # for i in range(4*station_radius, int(width - 3*station_radius), 4*station_radius):
         for i in range(width//10, 9*width//10 + 1, 4*station_radius):
-            row = []
-            # for j in range(4*station_radius, int(height - 3*station_radius), 4*station_radius):
             for j in range(height//5, 4*height//5 + 1, 4*station_radius):
                 station_positions.append(Point(i, j))
-        
+
         stations = []
         shape_choices = [StationType.CIRCLE, StationType.SQUARE, StationType.TRIANGLE]
         shape_weights = [.5, .35, .15]
@@ -77,12 +84,12 @@ class MiniMetroSim:
         for _ in range(num_stations):
             if len(station_positions) == 0:
                 return stations  # no more options
-            station_pos = random.choice(station_positions)
+            station_pos = rng.choice(station_positions)
             station_positions.remove(station_pos)
             if (len(stations) + 1) % 10 == 0:
-                shape = random.choice(rare_shape_choices)
+                shape = rng.choice(rare_shape_choices)
             else:
-                shape = random.choices(shape_choices, shape_weights, k=1)[0]
+                shape = rng.choices(shape_choices, shape_weights, k=1)[0]
             station = Station(shape, station_pos)
             stations.append(station)
 
@@ -119,12 +126,11 @@ class MiniMetroSim:
         self.lines.append(line)
 
     def step(self):
-        reward = 0
+        """Advance one tick: spawn passengers, move trains, check for overcrowding."""
         self.time += 1
-        delivered_passengers_all: list = []
         station_types = [st.type for st in self.stations]
 
-        # Re-activate resting passengers before spawning so the queue state is current.
+        # Resting passengers (re-entering after delivery) are switched off:
         # for s in self.stations:
         #     s.tick_resting(self.time, station_types)
 
@@ -133,57 +139,30 @@ class MiniMetroSim:
             self.last_spawned_at = self.time
             self.spawn_interval = current_spawn_interval(self.time)
             for i, s in enumerate(self.stations):
-                if random.random() < current_spawn_chance(self.time):
+                if self.rng.random() < current_spawn_chance(self.time):
                     probs = self.target_type_probs(i)
                     weights = [probs[t] for t in station_types]
-                    s.spawn_passenger(station_types, weights=weights, current_time=self.time)
-            
-        # Move trains and handle passengers
+                    s.spawn_passenger(station_types, weights=weights, current_time=self.time,
+                                      rng=self.rng)
+
         for line in self.lines:
             for train in line.trains:
-                delivered, speed_bonus, delivered_passengers = train.step(self.lines, current_time=self.time)
-                reward += delivered + speed_bonus
-                self.delivered += delivered
-                delivered_passengers_all.extend(delivered_passengers)
+                self.delivered += train.step(self.lines, current_time=self.time)
 
-        # Overcrowd penalty
         for s in self.stations:
             if len(s.waiting) > max_waiting:
-                self.overcrowing_ticks += 1
-                if self.overcrowing_ticks > _max_overcrowd_ticks:
+                self.overcrowded_ticks += 1
+                if self.overcrowded_ticks > max_overcrowd_ticks:
                     self.failed = True
-                reward -= _overcrowd_penalty
-            elif len(s.waiting) > max_waiting / 2:
-                reward -= _overcrowd_penalty / 2
-
-        return self._get_state(), reward, self.failed, delivered_passengers_all
-
-    def _get_state(self):
-        # Flattened representation for RL agent
-        state = []
-        for s in self.stations:
-            state.append(tuple([s.pos, s.type, len(s.waiting)]))
-        return state
-    
-    def run(self):
-        for _ in range(1000):
-            self.step()
-    
 
 
-if __name__ == "__main__":
+def run_playout(sim: MiniMetroSim, passenger_seed: int, max_ticks: int) -> tuple[int, int]:
+    """Play a finished design forward on a copy of `sim`. Returns (ticks survived, delivered).
 
-    random.seed(2026)
-    sim = MiniMetroSim()
-    sim.run()
-    print(sim._get_state())
-
-    
-
-
-
-
-
-
-
-
+    Module-level so it can be sent to worker processes.
+    """
+    s = copy.deepcopy(sim)
+    s.set_passenger_seed(passenger_seed)
+    while s.time < max_ticks and not s.failed:
+        s.step()
+    return s.time, s.delivered

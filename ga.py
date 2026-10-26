@@ -7,9 +7,10 @@ Improvements over the initial version:
   2. Graph-constrained genomes: lines are random walks in the neighbor graph;
      insertion mutations only place stations at valid neighbor positions.
   3. Structural fitness: each genome is replayed as a sequence of RL actions
-     so that _compute_structural_reward (crossings, bends, isolation, reach,
-     coverage, connection cost) contributes directly to fitness alongside the
-     simulation ticks-survived signal.
+     so that structural_reward (bends, isolation, reach, coverage, connection
+     cost) contributes directly to fitness alongside the simulation
+     ticks-survived signal. Steps that break the rules (rules.py: crossings,
+     train limits) are skipped.
 """
 
 from __future__ import annotations
@@ -23,16 +24,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
-from agent import (
-    MAX_TRAINS,
-    MAX_TRAINS_PER_LINE,
-    ActionType,
-    _apply_add_train,
-    _apply_extend,
-    _compute_structural_reward,
-    apply_action,
-)
-from simulator import MiniMetroSim, max_lines
+from heuristic import MAX_DIST, structural_reward
+from rules import MAX_TRAINS, MAX_TRAINS_PER_LINE, ActionType, apply_action, is_legal
+from simulator import MiniMetroSim, max_lines, run_playout
 
 with open("config.yaml") as f:
     _config = yaml.safe_load(f)
@@ -55,7 +49,6 @@ def build_neighbor_graph(
 
     The result is a symmetric adjacency dict.
     """
-    from agent import MAX_DIST
     n = len(stations)
     thresh = max_dist_fraction * MAX_DIST
     neighbors: dict[int, set[int]] = {i: set() for i in range(n)}
@@ -170,25 +163,40 @@ def _random_genome_from_graph(
 # Apply genome to simulator
 # ---------------------------------------------------------------------------
 
-def apply_genome(sim: MiniMetroSim, genome: Genome) -> None:
-    """Apply a genome to a freshly-created (lines-empty) sim in-place."""
-    total_trains = 0
+def genome_actions(sim: MiniMetroSim, genome: Genome):
+    """Build `genome` on `sim` (stations, no lines) as design actions, yielding each action
+    just before it is applied. Steps the rules forbid are skipped: a line whose first
+    segment would cross the network, a station whose segment would, extra trains."""
     for i, raw_line in enumerate(genome.lines):
         if len(sim.lines) >= max_lines:
             break
-        valid = [idx for idx in raw_line if 0 <= idx < len(sim.stations)]
-        unique = _dedupe(valid)
+        unique = _dedupe([idx for idx in raw_line if 0 <= idx < len(sim.stations)])
         if len(unique) < 2:
             continue
-        sim.add_line([unique[0], unique[1]])
+        action = (ActionType.NEW_LINE, unique[0], unique[1])
+        if not is_legal(sim, action):
+            continue
+        yield action
+        apply_action(sim, action)
         line_idx = len(sim.lines) - 1
-        total_trains += 1
-        for j in range(2, len(unique)):
-            _apply_extend(sim, line_idx, -1, unique[j])
-        desired = min(genome.trains[i] if i < len(genome.trains) else 1, MAX_TRAINS_PER_LINE)
+        for j in unique[2:]:
+            action = (ActionType.EXTEND_LINE, line_idx, -1, j)
+            if is_legal(sim, action):
+                yield action
+                apply_action(sim, action)
+        desired = genome.trains[i] if i < len(genome.trains) else 1
         for _ in range(desired - 1):
-            if total_trains < MAX_TRAINS and _apply_add_train(sim, line_idx) is not None:
-                total_trains += 1
+            action = (ActionType.ADD_TRAIN, line_idx)
+            if not is_legal(sim, action):
+                break
+            yield action
+            apply_action(sim, action)
+
+
+def apply_genome(sim: MiniMetroSim, genome: Genome) -> None:
+    """Apply a genome to a freshly-created (lines-empty) sim in-place."""
+    for _ in genome_actions(sim, genome):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -198,46 +206,12 @@ def apply_genome(sim: MiniMetroSim, genome: Genome) -> None:
 def compute_structural_reward(template_sim: MiniMetroSim, genome: Genome) -> float:
     """Replay genome as RL design actions and accumulate structural reward.
 
-    Reuses _compute_structural_reward from agent.py verbatim, so the GA sees
-    the same crossing/bend/isolation/reach/coverage signals that the DQN
-    receives during its design phase.  The template_sim must have stations but
-    no lines yet.
+    Reuses structural_reward from heuristic.py verbatim, so the GA sees the same
+    bend/isolation/reach/coverage signals the agent's prior uses. The template_sim must
+    have stations but no lines yet.
     """
     sim = copy.deepcopy(template_sim)
-    total = 0.0
-
-    for i, raw_line in enumerate(genome.lines):
-        if len(sim.lines) >= max_lines:
-            break
-        valid = [idx for idx in raw_line if 0 <= idx < len(sim.stations)]
-        unique = _dedupe(valid)
-        if len(unique) < 2:
-            continue
-
-        action = (ActionType.NEW_LINE, unique[0], unique[1])
-        total += _compute_structural_reward(sim, action)
-        apply_action(sim, action)
-        line_idx = len(sim.lines) - 1
-
-        for j in range(2, len(unique)):
-            action = (ActionType.EXTEND_LINE, line_idx, -1, unique[j])
-            total += _compute_structural_reward(sim, action)
-            apply_action(sim, action)
-
-        desired = genome.trains[i] if i < len(genome.trains) else 1
-        current = len(sim.lines[line_idx].trains)
-        for _ in range(desired - current):
-            if sum(len(l.trains) for l in sim.lines) >= MAX_TRAINS:
-                break
-            line = sim.lines[line_idx]
-            if len(line.stations) <= len(line.trains) + 1:
-                break
-            action = (ActionType.ADD_TRAIN, line_idx)
-            total += _compute_structural_reward(sim, action)
-            if apply_action(sim, action)["train"] is None:
-                break
-
-    return total
+    return sum(structural_reward(sim, action) for action in genome_actions(sim, genome))
 
 
 # ---------------------------------------------------------------------------
@@ -253,27 +227,13 @@ def evaluate(
     structural_weight: float = 1.0,
 ) -> float:
     """Combined fitness: mean ticks survived + structural_weight * structural reward."""
-    if map_seed is not None:
-        rng = random.getstate()
-        random.seed(map_seed)
-        template = MiniMetroSim(num_stations)
-        random.setstate(rng)
-    else:
-        template = MiniMetroSim(num_stations)
+    template = MiniMetroSim(num_stations, map_seed=map_seed)
 
     s_reward = compute_structural_reward(template, genome)
 
-    total_ticks = 0
-    for _ in range(num_playouts):
-        sim = copy.deepcopy(template)
-        apply_genome(sim, genome)
-        t = 0
-        while t < max_ticks:
-            _, _, lost, _ = sim.step()
-            t += 1
-            if lost:
-                break
-        total_ticks += t
+    design = copy.deepcopy(template)
+    apply_genome(design, genome)
+    total_ticks = sum(run_playout(design, random.randrange(2 ** 31), max_ticks)[0] for _ in range(num_playouts))
 
     return total_ticks / num_playouts + structural_weight * s_reward
 
@@ -457,10 +417,7 @@ class GeneticAlgorithm:
         """Return the neighbor graph for map_seed, rebuilding if the seed changed."""
         if map_seed == self._cached_seed and self._neighbors is not None:
             return self._neighbors
-        rng = random.getstate()
-        random.seed(map_seed)
-        ref = MiniMetroSim(self.num_stations)
-        random.setstate(rng)
+        ref = MiniMetroSim(self.num_stations, map_seed=map_seed)
         self._neighbors = build_neighbor_graph(
             ref.stations, self.min_neighbors, self.max_dist_fraction
         )

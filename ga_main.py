@@ -7,7 +7,6 @@ Mirrors main.py in structure so results can be compared directly:
   - Final visualized run with the best genome found
 """
 
-import random
 import yaml
 import matplotlib.pyplot as plt
 import numpy as np
@@ -84,26 +83,17 @@ with open("config.yaml") as f:
     config = yaml.safe_load(f)
 WIDTH, HEIGHT = config["resolution"]
 
-vis = Visualizer(WIDTH, HEIGHT)
-vis.episode = NUM_GENERATIONS + 1
-
-rng = random.getstate()
-random.seed(0)
-sim = MiniMetroSim(ga.num_stations)
-random.setstate(rng)
-
 assert ga.best_genome is not None, "No best genome found — did training run?"
+sim = MiniMetroSim(ga.num_stations, map_seed=0)
 apply_genome(sim, ga.best_genome)
 
 print("Running final visualized simulation with best genome...")
-ticks = 0
-while ticks < 50_000:
-    _, _, lost, _ = sim.step()
-    vis.draw(sim, epsilon=0)
-    ticks += 1
-    if lost:
-        break
-
-print(f"Final Run | Ticks: {ticks}")
-vis.hold()
-vis.close()
+vis = Visualizer(WIDTH, HEIGHT)
+vis.new_map(map=0, policy="GA best genome")
+try:
+    vis.play(sim)
+    print(f"Final Run | Ticks: {sim.time}")
+except SystemExit:
+    pass
+finally:
+    vis.close()

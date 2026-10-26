@@ -1,127 +1,113 @@
-from agent import Agent
-from visualizer import Visualizer
-import yaml
+"""Train the design agent with branch-and-compare, validated against the heuristic.
+
+Every episode is a new map. Every EVAL_EVERY episodes the current weights are scored on
+VAL_MAPS, paired with the heuristic on the same maps and passenger seeds, and the best
+ratio is kept in checkpoint_v4_best. VAL_MAPS are disjoint from the training maps
+(0..9999) and from bench.py's maps, so the final `python bench.py agent` report is not
+inflated by checkpoint selection.
+"""
+
+import math
+import random
+
 import matplotlib.pyplot as plt
 import numpy as np
 
+import bench
+from agent import Agent
+
 NUM_EPISODES = 500
 ROLLING_WINDOW = 50
-MAP_BLOCK_SIZE = 10  # episodes per map seed before resampling
-EVAL_EVERY = 25      # episodes between held-out evaluations
-
-# Held-out maps the agent NEVER trains on. Training seeds are episode // MAP_BLOCK_SIZE
-# (0..49 for 500 episodes), so this band is disjoint — it measures generalization.
-TEST_SEEDS = list(range(10_000, 10_010))
-
-agent = Agent(num_stations=20, epsilon_decay=0.994, epsilon_min=0.005,
-              replays_per_step=1, k_candidates=10, num_playouts=3,
-              mcts_sims=30, mcts_horizon=6)  # mcts_sims=0 disables look-ahead (greedy)
-agent.load()
-
-rewards = []
-ticks = []
-eval_episodes = []   # x positions (episode index) of each evaluation
-eval_rewards = []    # mean held-out reward at each evaluation
-
-# TODO:
-# make user input option
-map_seed = 0    
-for episode in range(NUM_EPISODES):
-    if episode % MAP_BLOCK_SIZE == 0:
-        map_seed = np.random.randint(10000)
-    reward = agent.train_episode(map_seed=map_seed)
-    rewards.append(reward)
-    ticks.append(agent.last_episode_ticks)
-    print(f"Episode {episode + 1:4d} | Map {map_seed:3d} | Reward: {reward:7.1f} | Epsilon: {agent.epsilon:.4f} | Ticks: {agent.last_episode_ticks}")
-
-    if (episode + 1) % EVAL_EVERY == 0:
-        eval_reward, eval_ticks = agent.evaluate(TEST_SEEDS)
-        eval_episodes.append(episode + 1)
-        eval_rewards.append(eval_reward)
-        print(f"  >> EVAL on {len(TEST_SEEDS)} held-out maps | Reward: {eval_reward:7.1f} | Ticks: {eval_ticks:7.1f}")
-        # Checkpoint the best generalizing agent, judged on held-out maps (not the
-        # noisy training reward, which is inflated by exploration on memorized seeds).
-        agent.save_if_best(eval_reward, path="checkpoint_v3_best")
-
-    if (episode + 1) % 50 == 0:
-        agent.save()  # latest
+EVAL_EVERY = 25
+CKPT = "checkpoint_v4"
+BEST_CKPT = "checkpoint_v4_best"
+VAL_MAPS = list(range(20_000, 20_040))
+VAL_SEEDS = list(range(3))
+WORKERS = bench.default_workers()
 
 
-# ---- summary plot ----
-# fig, (ax_reward, ax_ticks) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
-episodes = np.arange(1, len(rewards) + 1)
+def plot(history: list[dict], evals: list[tuple[int, dict]], path: str = "training_summary.png"):
+    fig, (ax_train, ax_val) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+    episodes = np.arange(1, len(history) + 1)
+    greedy = np.array([h["ticks_greedy"] for h in history])
+    ax_train.plot(episodes, greedy, color="#39a6f5", linewidth=0.7, label="greedy design on the training map")
+    if len(greedy) >= ROLLING_WINDOW:
+        rolling = np.convolve(greedy, np.ones(ROLLING_WINDOW) / ROLLING_WINDOW, mode="valid")
+        ax_train.plot(np.arange(ROLLING_WINDOW, len(greedy) + 1), rolling, color="#1f77b4",
+                      linewidth=2, label=f"rolling mean ({ROLLING_WINDOW})")
+    ax_train.set_ylabel("ticks survived (capped)")
+    ax_train.legend(loc="best")
+    ax_train.grid(alpha=0.3)
 
-rewards = np.clip(rewards, -2000, 20000)
-ticks = np.clip(ticks, -2000, 20000)
+    if evals:
+        x = [e for e, _ in evals]
+        ratio = np.array([c["ratio"] for _, c in evals])
+        lo = np.array([c["lo"] for _, c in evals])
+        hi = np.array([c["hi"] for _, c in evals])
+        ax_val.errorbar(x, ratio, yerr=[ratio - lo, hi - ratio], color="#2ca02c", marker="o",
+                        capsize=3, linewidth=2, label="validation survival vs heuristic (geo-mean, 95% CI)")
+    ax_val.axhline(1.0, color="black", linewidth=0.8, linestyle="--", label="heuristic")
+    ax_val.set_ylabel("ratio vs heuristic")
+    ax_val.set_xlabel("episode")
+    ax_val.legend(loc="best")
+    ax_val.grid(alpha=0.3)
 
-plt.subplots(figsize=(20, 10))
-plt.plot(episodes, rewards, color="#39a6f5", linewidth=0.7, label="reward")
-if len(rewards) >= ROLLING_WINDOW:
-    rolling = np.convolve(rewards, np.ones(ROLLING_WINDOW) / ROLLING_WINDOW, mode="valid")
-    plt.plot(
-        np.arange(ROLLING_WINDOW, len(rewards) + 1),
-        rolling,
-        color="#1f77b4",
-        linewidth=2,
-        label=f"rolling mean ({ROLLING_WINDOW})",
-    )
-# ax_reward.set_ylabel("episode reward")
-# ax_reward.set_xlabel("episode")
-# ax_reward.axhline(0, color="black", linewidth=0.5, alpha=0.3)
-# ax_reward.legend(loc="best")
-# ax_reward.grid(alpha=0.3)
-
-# fig.suptitle(f"Training summary ({NUM_EPISODES} episodes, {agent.num_stations} stations)")
-# fig.tight_layout()
-# fig.savefig("training_summary.png", dpi=120)
-
-plt.plot(episodes, ticks, color="#ee637a", linewidth=0.7, label="ticks survived")
-if len(rewards) >= ROLLING_WINDOW:
-    rolling = np.convolve(ticks, np.ones(ROLLING_WINDOW) / ROLLING_WINDOW, mode="valid")
-    plt.plot(
-        np.arange(ROLLING_WINDOW, len(ticks) + 1),
-        rolling,
-        color="#e61e3f",
-        linewidth=2,
-        label=f"rolling mean ({ROLLING_WINDOW})",
-    )
-# Held-out evaluation curve (greedy, never-trained maps) — the generalization signal.
-if eval_rewards:
-    plt.plot(
-        eval_episodes,
-        np.clip(eval_rewards, -2000, 20000),
-        color="#2ca02c",
-        marker="o",
-        linewidth=2,
-        label="held-out eval reward",
-    )
-
-plt.ylabel("rewards/ticks")
-plt.xlabel("episode")
-# plt.axhline(0, color="black", linewidth=0.5, alpha=0.3)
-plt.legend(loc="best")
-plt.grid(alpha=0.3)
-plt.yticks()
-plt.suptitle(f"Training summary ({NUM_EPISODES} episodes, {agent.num_stations} stations)")
-# plt.tight_layout()
-plt.savefig("training_summary.png", dpi=120)
-
-print("Saved training_summary.png")
-plt.show()
+    fig.suptitle(f"Training summary ({len(history)} episodes, branch-and-compare)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    print(f"Saved {path}")
+    plt.show()
 
 
-# ---- final visualized run ----
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
-WIDTH, HEIGHT = config["resolution"]
+def train(agent: Agent, num_episodes: int, ckpt: str = CKPT, best_ckpt: str = BEST_CKPT):
+    """Run training episodes on fresh maps, validating every EVAL_EVERY. Returns (history, evals)."""
+    heuristic_val = bench.run(bench.PolicySpec("heuristic"), VAL_MAPS, VAL_SEEDS, workers=WORKERS)
+    print(bench.report("heuristic on validation maps", heuristic_val))
 
-vis = Visualizer(WIDTH, HEIGHT)
+    map_rng = random.Random()
+    history: list[dict] = []
+    evals: list[tuple[int, dict]] = []
+    for episode in range(num_episodes):
+        stats = agent.train_episode(map_seed=map_rng.randrange(10_000))
+        history.append(stats)
+        print(f"Episode {episode + 1:4d} | Map {stats['map_seed']:4d} | greedy {stats['ticks_greedy']:6.0f}"
+              f" | best found {stats['ticks_best']:6.0f} | accepted {stats['accepted']}/{agent.branch_rounds}"
+              f" | mean |adv| {stats['mean_abs_adv']:.3f} | loss {stats['loss']:.4f}", flush=True)
 
-vis.episode = NUM_EPISODES + 1
-agent.epsilon = 0
-agent.mcts_sims = 100  # deeper search for the showcase run (slower but stronger planning)
-reward = agent.train_episode(visualizer=vis)
-print(f"Final Run | Reward: {reward:7.1f} | Epsilon: {agent.epsilon:.4f}")
+        if (episode + 1) % EVAL_EVERY == 0:
+            agent.save(ckpt)
+            val = bench.run(bench.PolicySpec("agent", ckpt=ckpt), VAL_MAPS, VAL_SEEDS, workers=WORKERS)
+            c = bench.compare(val, heuristic_val)
+            evals.append((episode + 1, c))
+            print(f"  >> VAL vs heuristic ({c['n']} maps): x{c['ratio']:.3f} [95% CI {c['lo']:.3f}, {c['hi']:.3f}]"
+                  f" | better on {c['wins']:.0%}, worse on {c['losses']:.0%}", flush=True)
+            agent.save_if_best(math.log(c["ratio"]), path=best_ckpt)
+    return history, evals
 
-vis.hold()
-vis.close()
+
+def main():
+    agent = Agent(num_stations=20, workers=WORKERS)
+    agent.load(CKPT)
+    try:
+        history, evals = train(agent, NUM_EPISODES)
+    finally:
+        agent.close()
+
+    plot(history, evals)
+
+    # ---- final visualized run with the best checkpoint (more: python run_visual.py) ----
+    from run_visual import watch
+    from simulator import config
+    from visualizer import Visualizer
+    agent.load(BEST_CKPT)
+    vis = Visualizer(*config["resolution"])
+    try:
+        watch(agent, vis, [random.randrange(10_000)], policy=BEST_CKPT)
+    except SystemExit:
+        pass
+    finally:
+        vis.close()
+
+
+if __name__ == "__main__":
+    main()
