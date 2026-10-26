@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = [
+    "slow: plays many full games or loads torch models (deselect with -m 'not slow')",
+]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]

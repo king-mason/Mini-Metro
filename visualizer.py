@@ -356,8 +356,8 @@ class Visualizer:
             self.stage = f"Polishing the design by play-out search ({rounds} rounds)..."
         else:
             kept = ", ".join(f"{k} x{v}" for k, v in stats["accepted"].items()) or "nothing yet"
-            self.stage = (f"Search round {round_idx}/{rounds}: {stats['start']:.0f} -> {stats['final']:.0f}"
-                          f" ticks on search seeds (kept {kept})")
+            self.stage = (f"Search round {round_idx}/{rounds}: {stats['start']:.0f} -> ~{stats['final']:.0f}"
+                          f" ticks (kept {kept})")
         for cmd in self._commands():
             if cmd == "skip":
                 return False

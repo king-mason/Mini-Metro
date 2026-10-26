@@ -2,17 +2,20 @@
 
 Start from any complete design (e.g. the agent's), propose small edits — move a train, add
 a train, drop / extend / shift a line end, reverse a stretch of a line — score them by real
-play-outs on a fixed set of passenger seeds, and keep the best edit if it beats the current
-design. Nothing is predicted: every accepted edit was measured to help on this map. This is
+play-outs on fresh passenger seeds each round, and keep the best edit if it beats the current
+design by more than the play-out noise. Nothing is predicted: every accepted edit was measured to help on this map. This is
 how the agent adapts to a particular map; it costs play-outs, not training.
 """
 
 from __future__ import annotations
 
 import copy
+import math
 import random
 from collections import Counter
 from dataclasses import dataclass
+
+import numpy as np
 
 from heuristic import NEIGHBOR_K_DEFAULT, neighbor_sets
 from rules import MAX_TRAINS, MAX_TRAINS_PER_LINE, apply_add_train, apply_extend, segments_cross
@@ -117,39 +120,73 @@ def propose(spec: Spec, base: MiniMetroSim, nbrs: list[set[int]], rng: random.Ra
 
 
 def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, batch: int = 8,
-            min_gain: float = 0.01, rng: random.Random | None = None,
+            n_seeds: int = 4, min_gain: float = 0.01, z: float = 1.0,
+            seed_rng: random.Random | None = None, rng: random.Random | None = None,
             on_round=None) -> tuple[MiniMetroSim, dict]:
     """Batched hill-climb from the design `start` on the map `base`.
 
-    score(list of sims) -> list of mean ticks survived, all on the same passenger seeds.
-    Each round scores `batch` distinct edits of the current design together and keeps the
-    best one if it beats the current score by more than `min_gain` (relative).
+    score(sims, seeds) -> array (len(sims), len(seeds)) of ticks survived.
+
+    Each round plays the current design and batch - 1 distinct edits of it on n_seeds fresh
+    passenger seeds (from seed_rng), and compares every edit with the current design seed by
+    seed, in log ticks. The best edit replaces the current design only if its mean gain is
+    more than min_gain (relative) and more than z standard errors, the noise estimated from
+    all of the round's edits together. Fresh seeds every round keep the search from fitting
+    a few seeds, and re-scoring the current design means a lucky winner is not trusted at
+    its lucky score.
+
+    z = 1 is calibrated on real games (16 maps x 10 rounds, each round's best edit re-measured
+    on 16 more seeds): the luckiest-of-7 bias is small (+0.007 log), so most best edits are
+    real gains and a strict gate mostly rejects them. Taking every best edit over 1% took 58%
+    of rounds, 8% of them truly worse; z = 1 takes 47%, 4% worse, for ~4% less total gain;
+    z = 2 takes none that are worse but gives up ~10% of the gain.
+
+    Cost: rounds * batch designs, plus the starting design scored once more at the end.
+    stats["start"] / stats["final"] are mean ticks of the starting / returned design, each
+    on its own fresh seeds, so final / start is an honest (if noisy) estimate of the gain.
+
     on_round(round, rounds, design, stats), if given, is called after each round with the
-    current best design; returning False stops the search early.
-    Returns (best design, stats).
+    current design; returning False stops the search early.
     """
     rng = rng or random.Random()
+    seed_rng = seed_rng or random.Random(rng.random())
     nbrs = neighbor_sets(base, NEIGHBOR_K_DEFAULT)
     current = spec_of(start)
-    current_score = start_score = score([build(base, current)])[0]
     accepted = Counter()
+    stats = {"start": None, "final": None, "accepted": {}, "rounds": 0}
+
+    def fresh_seeds():
+        return [seed_rng.randrange(1_000, 2 ** 31) for _ in range(n_seeds)]
+
     for round_idx in range(rounds):
         proposals: list[tuple[Spec, str]] = []
         for _ in range(batch * 20):  # most draws apply; cap the attempts anyway
-            if len(proposals) == batch:
+            if len(proposals) == batch - 1:
                 break
             p = propose(current, base, nbrs, rng)
             if p is not None and all(p[0] != q[0] for q in proposals):
                 proposals.append(p)
         if not proposals:
             break
-        scores = score([build(base, spec) for spec, _ in proposals])
-        best = max(range(len(proposals)), key=scores.__getitem__)
-        if scores[best] > current_score * (1 + min_gain):
-            current, current_score = proposals[best][0], scores[best]
+        ticks = np.asarray(score([build(base, current)] + [build(base, spec) for spec, _ in proposals],
+                                 fresh_seeds()), dtype=float)
+        if stats["start"] is None:
+            stats["start"] = float(ticks[0].mean())
+        gains = np.log(ticks[1:]) - np.log(ticks[0])            # (edits, seeds), paired by seed
+        mean = gains.mean(axis=1)
+        noise = math.sqrt(float(gains.var(axis=1, ddof=1).mean())) if n_seeds > 1 else 0.0
+        best = int(np.argmax(mean))
+        take = mean[best] > max(math.log1p(min_gain), z * noise / math.sqrt(n_seeds))
+        if take:
+            current = proposals[best][0]
             accepted[proposals[best][1]] += 1
-        if on_round is not None:
-            stats = {"start": start_score, "final": current_score, "accepted": dict(accepted)}
-            if on_round(round_idx + 1, rounds, build(base, current), stats) is False:
-                break
-    return build(base, current), {"start": start_score, "final": current_score, "accepted": dict(accepted)}
+        # provisional; replaced by an unbiased re-measurement after the last round
+        stats.update(accepted=dict(accepted), rounds=round_idx + 1,
+                     final=float(ticks[1 + best].mean() if take else ticks[0].mean()))
+        if on_round is not None and on_round(round_idx + 1, rounds, build(base, current), dict(stats)) is False:
+            break
+
+    design = build(base, current)
+    if stats["rounds"]:
+        stats["final"] = float(np.mean(score([design], fresh_seeds())[0]))
+    return design, stats

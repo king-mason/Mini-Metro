@@ -456,30 +456,32 @@ class Agent:
             self._pool.shutdown()
             self._pool = None
 
-    def score_designs(self, sims: list[MiniMetroSim], seeds: list[int]) -> list[float]:
-        """Mean ticks survived (capped at playout_cap) of each design over the same seeds."""
+    def playout_ticks(self, sims: list[MiniMetroSim], seeds: list[int]) -> np.ndarray:
+        """Ticks survived (capped at playout_cap), shape (len(sims), len(seeds))."""
         jobs = [(sim, seed) for sim in sims for seed in seeds]
         job_sims, job_seeds = zip(*jobs)
         if self.workers > 0:
             results = list(self._get_pool().map(run_playout, job_sims, job_seeds, repeat(self.playout_cap)))
         else:
             results = [run_playout(sim, seed, self.playout_cap) for sim, seed in jobs]
-        k = len(seeds)
-        return [float(np.mean([t for t, _ in results[i * k:(i + 1) * k]])) for i in range(len(sims))]
+        return np.array([t for t, _ in results], dtype=float).reshape(len(sims), len(seeds))
+
+    def score_designs(self, sims: list[MiniMetroSim], seeds: list[int]) -> list[float]:
+        """Mean ticks survived (capped at playout_cap) of each design over the same seeds."""
+        return self.playout_ticks(sims, seeds).mean(axis=1).tolist()
 
     def improve(self, sim0: MiniMetroSim, design: MiniMetroSim, rounds: int = 10, batch: int = 8,
-                seeds: list[int] | None = None, rng: random.Random | None = None,
+                seed_rng: random.Random | None = None, rng: random.Random | None = None,
                 on_round=None) -> tuple[MiniMetroSim, dict]:
         """Polish a finished design for this map with play-out-verified local edits (search.py).
 
-        seeds are the passenger seeds edits are judged on; keep them disjoint from any seeds
-        the result will be evaluated on, or the search tunes itself to the evaluation.
-        on_round is passed to search.improve (progress display)."""
+        Each round draws playout_seeds fresh passenger seeds from seed_rng (default: from the
+        agent's rng); when the result will be evaluated on known seeds, pass a seed_rng that
+        can't produce them (bench.search_seed_rng). on_round is passed to search.improve."""
         from search import improve
-        if seeds is None:
-            seeds = [self.rng.randrange(2 ** 31) for _ in range(self.playout_seeds)]
-        return improve(sim0, design, lambda sims: self.score_designs(sims, seeds),
-                       rounds=rounds, batch=batch, rng=rng or self.rng, on_round=on_round)
+        return improve(sim0, design, self.playout_ticks, rounds=rounds, batch=batch,
+                       n_seeds=self.playout_seeds, seed_rng=seed_rng or random.Random(self.rng.random()),
+                       rng=rng or self.rng, on_round=on_round)
 
     # ---- training ----
 

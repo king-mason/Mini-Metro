@@ -54,9 +54,10 @@ def make_agent(spec: PolicySpec):
     return agent
 
 
-def search_seeds(map_seed: int) -> list[int]:
-    """Passenger seeds a design search may judge edits on: fixed per map, never BENCH_SEEDS."""
-    return [1_000_000 + 10 * map_seed + i for i in range(4)]
+def search_seed_rng(map_seed: int) -> random.Random:
+    """Where a design search draws its passenger seeds on this map: reproducible per map, and
+    search.improve draws seeds >= 1000, so never BENCH_SEEDS (or main.py's VAL_SEEDS)."""
+    return random.Random(1_000_000 + map_seed)
 
 
 def evaluate_map(agent, map_seed: int, seeds: list[int], cap: int, search_rounds: int = 0) -> dict:
@@ -65,9 +66,10 @@ def evaluate_map(agent, map_seed: int, seeds: list[int], cap: int, search_rounds
     sim0 = MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
     result = agent.design(sim0)
     design = result.sim
+    stats = None
     if search_rounds > 0:
-        design, _ = agent.improve(sim0, design, rounds=search_rounds, seeds=search_seeds(map_seed),
-                                  rng=random.Random(map_seed))
+        design, stats = agent.improve(sim0, design, rounds=search_rounds, seed_rng=search_seed_rng(map_seed),
+                                      rng=random.Random(map_seed))
     runs = [run_playout(design, seed, cap) for seed in seeds]
     return {
         "map": map_seed,
@@ -76,6 +78,7 @@ def evaluate_map(agent, map_seed: int, seeds: list[int], cap: int, search_rounds
         "trains": sum(len(l.trains) for l in design.lines),
         "forced": result.n_forced,
         "stranded": result.n_stranded,
+        "search": stats,   # what the search measured on its own seeds (start / final ticks, edits kept)
     }
 
 

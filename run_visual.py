@@ -6,8 +6,8 @@
     python run_visual.py --heuristic --dev
 
 Press H in the window for the keys (also listed in visualizer.py). Maps given with --map
-play in order from that seed; otherwise they are random. The design search judges edits on
-bench.search_seeds(map), so a map always gets the same design.
+play in order from that seed; otherwise they are random. The design search draws its seeds
+from bench.search_seed_rng(map), so a map always gets the same design.
 """
 
 import argparse
@@ -26,9 +26,9 @@ def episode(agent: Agent, vis: Visualizer, map_seed: int, search_rounds: int, rn
     design = agent.design(sim0, on_step=vis.show_design_step).sim
     if search_rounds > 0:
         vis.show_search(0, search_rounds, design, None)
-        design, stats = agent.improve(sim0, design, rounds=search_rounds, seeds=bench.search_seeds(map_seed),
+        design, stats = agent.improve(sim0, design, rounds=search_rounds, seed_rng=bench.search_seed_rng(map_seed),
                                       rng=random.Random(map_seed), on_round=vis.show_search)
-        print(f"  search: {stats['start']:.0f} -> {stats['final']:.0f} ticks on search seeds, kept {stats['accepted']}")
+        print(f"  search: {stats['start']:.0f} -> {stats['final']:.0f} ticks (fresh seeds), kept {stats['accepted']}")
     while True:
         passenger_seed = rng.randrange(2 ** 31)
         vis.set_info(passengers=passenger_seed)
