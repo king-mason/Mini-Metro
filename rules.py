@@ -5,7 +5,7 @@ shared by everything that builds a design (the agent, search.py, the GA, play.py
 
   - at most `lines.max` lines, each visiting a station at most once;
   - at most `trains.total` trains, `trains.max_per_line` per line, and no more trains on
-    a line than it has segments;
+    a line than it has segments; a new line starts with a train, so it needs one free;
   - a line's trains run evenly spaced in time (objects.Line.space_trains);
   - no two segments may cross. Lines meet only at shared stations, where passengers can
     change trains. (A segment passing exactly over a station or along another segment is
@@ -103,8 +103,9 @@ def is_legal(sim: MiniMetroSim, action: tuple) -> bool:
         return True
     if t == ActionType.ADD_TRAIN:
         return can_add_train(sim, action[1])
-    if t == ActionType.NEW_LINE:
-        if len(sim.lines) >= MAX_LINES or action[1] == action[2]:
+    if t == ActionType.NEW_LINE:  # a new line comes with a train, so it needs one free
+        if (len(sim.lines) >= MAX_LINES or action[1] == action[2]
+                or sum(len(l.trains) for l in sim.lines) >= MAX_TRAINS):
             return False
     elif t in (ActionType.EXTEND_LINE, ActionType.INSERT_STATION):
         if sim.stations[action[3]] in sim.lines[action[1]].stations:

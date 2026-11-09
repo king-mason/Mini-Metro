@@ -83,6 +83,8 @@ def _why_illegal(sim: MiniMetroSim, action: tuple) -> str:
             return f"All {MAX_LINES} lines are in use."
         if action[1] == action[2]:
             return "Pick two different stations."
+        if sum(len(l.trains) for l in sim.lines) >= MAX_TRAINS:
+            return f"A new line needs a train, and all {MAX_TRAINS} are in use."
     if t == ActionType.EXTEND_LINE and sim.stations[action[3]] in sim.lines[action[1]].stations:
         return "That station is already on this line."
     return "Lines may not cross; they can only meet at a station."

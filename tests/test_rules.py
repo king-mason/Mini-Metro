@@ -68,7 +68,8 @@ def test_is_legal_rejects_exactly_the_crossings(map_seed, seed):
         if action[0] == ActionType.ADD_TRAIN:
             assert is_legal(sim, action) == can_add_train(sim, action[1])
             continue
-        if action[0] == ActionType.NEW_LINE and (len(sim.lines) >= MAX_LINES or action[1] == action[2]):
+        if action[0] == ActionType.NEW_LINE and (len(sim.lines) >= MAX_LINES or action[1] == action[2]
+                                                 or sum(len(l.trains) for l in sim.lines) >= MAX_TRAINS):
             assert not is_legal(sim, action)
             continue
         if action[0] != ActionType.NEW_LINE and sim.stations[action[3]] in sim.lines[action[1]].stations:
