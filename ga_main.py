@@ -1,13 +1,6 @@
-"""Runner for the Genetic Algorithm agent.
+"""Train the genetic algorithm (ga.py), plot its progress to ga_training_summary.png, and
+show the best genome. Fitness is mean ticks survived, as in main.py."""
 
-Mirrors main.py in structure so results can be compared directly:
-  - Same num_stations (20), same num_playouts (3)
-  - Fitness = mean ticks survived (matches agent.last_episode_ticks in main.py)
-  - Saves ga_training_summary.png alongside training_summary.png
-  - Final visualized run with the best genome found
-"""
-
-import yaml
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -79,16 +72,12 @@ print("Saved ga_training_summary.png")
 plt.show()
 
 # ---- final visualized run with best genome ----
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
-WIDTH, HEIGHT = config["resolution"]
-
 assert ga.best_genome is not None, "No best genome found — did training run?"
 sim = MiniMetroSim(ga.num_stations, map_seed=0)
 apply_genome(sim, ga.best_genome)
 
 print("Running final visualized simulation with best genome...")
-vis = Visualizer(WIDTH, HEIGHT)
+vis = Visualizer()
 vis.new_map(map=0, policy="GA best genome")
 try:
     vis.play(sim)

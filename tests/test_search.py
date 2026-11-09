@@ -11,7 +11,7 @@ import numpy as np
 from hypothesis import given, strategies as st
 
 from bench import BENCH_SEEDS
-from heuristic import NEIGHBOR_K_DEFAULT, neighbor_sets
+from metrics import neighbor_sets
 from search import Spec, build, improve, polish, propose, spec_of, valid
 from simulator import run_playout
 from tests.helpers import crossing_pairs, fresh_map, heuristic_design
@@ -38,7 +38,7 @@ def test_build_reproduces_a_design(map_index):
 @given(map_indices, seeds)
 def test_proposals_are_valid_legal_edits(map_index, seed):
     base, design = map_and_design(map_index)
-    spec, rng, nbrs = spec_of(design), random.Random(seed), neighbor_sets(base, NEIGHBOR_K_DEFAULT)
+    spec, rng, nbrs = spec_of(design), random.Random(seed), neighbor_sets(base)
     for _ in range(30):
         p = propose(spec, base, nbrs, rng)
         if p is None:

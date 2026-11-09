@@ -2,8 +2,10 @@
 
 from hypothesis import given, strategies as st
 
-from heuristic import get_candidate_actions, neighbor_sets, station_load_factors
-from rules import MAX_TRAINS, ActionType, apply_action, is_legal
+from config import MAX_TRAINS
+from heuristic import get_candidate_actions
+from metrics import neighbor_sets, station_load_factors
+from rules import ActionType, apply_action, is_legal
 from tests.helpers import crossing_pairs, fresh_map, heuristic_design, random_legal_design
 
 seeds = st.integers(min_value=0, max_value=10 ** 6)

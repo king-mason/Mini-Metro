@@ -1,23 +1,15 @@
-"""How long will a finished design survive? An analytic estimate, no play-outs (~5 ms).
+"""How long will a finished design survive? An analytic estimate, no play-outs (~4 ms).
 
-Passengers spawn at every station at the game's rate, which ramps up over time. Each
-passenger follows the game's own rules (objects.Passenger): they wait for the first train
-whose next stop gets them closer, and stay aboard while the train keeps getting them closer.
-Following those rules gives the riders per unit spawn rate who board and ride each train at each
-station. From those:
+Passengers spawn at the game's ramping rate and ride by the game's rules (they take the
+first train that gets them closer and stay aboard while it does). That gives the riders on
+each train at each station, and from them:
+  - each station's queue between trains: a sawtooth peaking at arrivals x the gap between
+    useful trains;
+  - riders left behind by full trains, or with no route at all, who pile up for good.
+The game ends when the overcrowded station-ticks run out; the estimate adds up the
+expected overcrowded time as spawning ramps up and returns that tick.
 
-  - between trains, a station's queue grows like a sawtooth whose peak is the arrival rate
-    times the gap between useful trains (round trip / trains on the line);
-  - riders a full train leaves behind pile up for good, as do riders with no route at all.
-
-The game is lost once station-ticks over capacity pass max_overcrowd_ticks; the estimate
-adds up the expected overcrowded time as spawning ramps up and returns the tick it runs out.
-
-On 500 training maps it ranked the designs a search tries by real survival with spearman
-0.93, and the edits within one search round at 0.77 (the measured noise ceiling is ~0.95),
-with the best edit in its top 3 88% of the time (measured before simulator.step drew
-targets by plain type share; then a type's odds went as its station count squared). The
-absolute ticks are only roughly right; use it to compare designs on one map.
+Use it to compare designs on one map: it ranks them well, but its ticks are only roughly right.
 """
 
 from __future__ import annotations
@@ -28,11 +20,11 @@ from collections import defaultdict
 
 import numpy as np
 
-from heuristic import TRAIN_CAPACITY, TRAIN_SPEED
-from simulator import (MiniMetroSim, current_spawn_chance, current_spawn_interval, max_overcrowd_ticks,
-                       max_waiting)
+from config import MAX_OVERCROWD_TICKS, STATION_CAPACITY, TRAIN_CAPACITY, TRAIN_SPEED
+from playouts import CAP
+from simulator import MiniMetroSim, current_spawn_chance, current_spawn_interval
 
-CAP_TICKS = 6000
+CAP_TICKS = CAP
 SPAWN_RATE = np.array([current_spawn_chance(t) / current_spawn_interval(t) for t in range(1, CAP_TICKS + 1)])
 CUM_SPAWNED = np.cumsum(SPAWN_RATE)
 
@@ -179,7 +171,7 @@ class SurvivalModel:
             sizes.sort(reverse=True)
             peak[s] = sizes[0] + 0.5 * sum(sizes[1:])
 
-        # seats: riders on (line, direction) at s want rate * ride of the 6 / gap seats per tick;
+        # seats: riders on (line, direction) at s want rate * ride of the capacity / gap seats per tick;
         # riders already aboard keep their seats, so a shortfall falls on those boarding at s
         keys = list(f["ride"])
         station = np.array([k[0] for k in keys], dtype=int)
@@ -190,11 +182,11 @@ class SurvivalModel:
         left_behind = short @ (station[:, None] == np.arange(n)[None])          # (ticks, stations)
 
         stuck = CUM_SPAWNED[:, None] * f["unreachable"][None] + np.cumsum(left_behind, axis=0)
-        room = max_waiting - stuck
+        room = STATION_CAPACITY - stuck
         top = SPAWN_RATE[:, None] * peak[None]
         # share of each tick a station spends over capacity, with the sawtooth's queue uniform on [0, top]
         over = np.where(room <= 0, 1.0, np.clip(1 - room / np.maximum(top, 1e-9), 0, 1))
-        ticks = min(int(np.searchsorted(np.cumsum(over.sum(1)), max_overcrowd_ticks)) + 1, CAP_TICKS)
+        ticks = min(int(np.searchsorted(np.cumsum(over.sum(1)), MAX_OVERCROWD_TICKS)) + 1, CAP_TICKS)
         return {"ticks": float(ticks), "peak": float(peak.max()),
                 "max_util": float((ride / seats).max()) if keys else 0.0,
                 "unreachable": float(f["unreachable"].sum()), "transfers": float(f["transfers"])}

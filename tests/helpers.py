@@ -6,10 +6,9 @@ from functools import lru_cache
 
 import numpy as np
 
-from rules import ActionType, MAX_LINES, apply_action, is_legal, line_segments, segments_cross
+from config import MAX_LINES, NUM_STATIONS
+from rules import ActionType, apply_action, is_legal, line_segments, segments_cross
 from simulator import MiniMetroSim
-
-NUM_STATIONS = 20
 
 
 def fresh_map(map_seed: int) -> MiniMetroSim:
@@ -44,7 +43,7 @@ def random_legal_design(map_seed: int, seed: int, attempts: int = 200) -> MiniMe
 def heuristic_agent():
     """The structural heuristic (Q off), shared by all tests. Imports torch on first use."""
     from agent import Agent
-    return Agent(num_stations=NUM_STATIONS, use_q=False)
+    return Agent(use_q=False)
 
 
 @lru_cache(maxsize=64)
@@ -72,9 +71,9 @@ def headway_gaps(line) -> list[list[int]]:
     visits: dict = {}
     for tick in range(2 * period):
         for train in trains:
-            was = train._at_station
+            was = train.at_station
             train.advance(1)
-            if train._at_station and not was and tick >= period:
+            if train.at_station and not was and tick >= period:
                 visits.setdefault((train.position, train.direction), []).append(tick)
     return [list(np.diff(sorted(t) + [sorted(t)[0] + period])) for t in visits.values()]
 

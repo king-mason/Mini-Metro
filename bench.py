@@ -1,15 +1,13 @@
-"""Fixed benchmark: do a policy's designs survive, compared with the structural heuristic?
+"""Fixed benchmark: how long do a policy's designs survive, compared with the heuristic?
 
-    python bench.py heuristic                          # structural priors alone (Q-net off)
+    python bench.py heuristic                          # the structural prior alone
     python bench.py agent --ckpt checkpoint_v4_best    # a trained checkpoint
     python bench.py agent --ckpt checkpoint_v4_best --mcts 30
-    python bench.py heuristic --search 10 --maps 20    # designs polished by play-out search
-    python bench.py heuristic --polish 30              # polished by the survival estimate (no play-outs)
+    python bench.py heuristic --search 10 --maps 20    # then polished by play-out search
+    python bench.py heuristic --polish 30              # then polished by the survival estimate
 
-Every policy sees the same held-out maps and passenger seeds, with play-outs capped at CAP
-ticks. Results go to bench_results/<name>.json and are compared, paired by map, with
-bench_results/heuristic.json when it exists — run `python bench.py heuristic` first.
-Beating the heuristic is the bar for any learned policy.
+Every run plays the same held-out maps and passenger seeds. Results go to
+bench_results/<name>.json and are compared, map by map, with bench_results/heuristic.json.
 """
 
 import argparse
@@ -21,27 +19,28 @@ import os
 import random
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, asdict
-from itertools import repeat
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
+from config import HEIGHT, MAX_TRAINS, WIDTH
+from playouts import CAP
+from point import Point
 from simulator import MiniMetroSim, run_playout
 
-BENCH_MAPS = list(range(10_000, 10_100))  # held out: training draws maps from 0..9999
-BENCH_SEEDS = list(range(5))              # passenger seeds, shared by every policy
-CAP = 6000                                # ticks; spawning plateaus by ~3000
-NUM_STATIONS = 20
-MAX_TRAINS = 10                           # config.yaml trains.total; for the "all trains" stat
+BENCH_MAPS = list(range(10_000, 10_100))  # held out: training uses maps 0..9999
+BENCH_SEEDS = list(range(5))              # passenger seeds, shared by every run
 RESULTS_DIR = "bench_results"
 
 
 @dataclass
 class PolicySpec:
-    kind: str = "heuristic"     # "heuristic" (structural prior only) or "agent" (prior + learned Q)
+    kind: str = "heuristic"     # "heuristic" (prior only) or "agent" (prior + learned Q)
     ckpt: str | None = None
     mcts_sims: int = 0
-    screen_edits: bool = True   # search: survival.py picks which edits to play
+    polish_rounds: int = 0      # then hill-climb on the survival estimate
+    search_rounds: int = 0      # then play-out search
+    screen_edits: bool = True   # search plays the edits the survival estimate rates best
 
 
 def default_workers() -> int:
@@ -50,32 +49,28 @@ def default_workers() -> int:
 
 def make_agent(spec: PolicySpec):
     from agent import Agent
-    agent = Agent(num_stations=NUM_STATIONS, use_q=spec.kind == "agent", mcts_sims=spec.mcts_sims,
-                  screen_edits=spec.screen_edits)
-    if spec.kind == "agent" and not agent.load(spec.ckpt, verbose=False):
+    agent = Agent(use_q=spec.kind == "agent", mcts_sims=spec.mcts_sims, screen_edits=spec.screen_edits)
+    if spec.kind == "agent" and not agent.load(spec.ckpt):
         raise FileNotFoundError(f"no compatible checkpoint at {spec.ckpt}/")
     return agent
 
 
 def search_seed_rng(map_seed: int) -> random.Random:
-    """Where a design search draws its passenger seeds on this map: reproducible per map, and
-    search.improve draws seeds >= 1000, so never BENCH_SEEDS (or main.py's VAL_SEEDS)."""
+    """Seeds a search uses on this map: reproducible, and >= 1000 (search.improve), so never
+    the bench's or validation's."""
     return random.Random(1_000_000 + map_seed)
 
 
-def evaluate_map(agent, map_seed: int, seeds: list[int], cap: int, search_rounds: int = 0,
-                 polish_rounds: int = 0) -> dict:
-    """Design greedily on one map (then polish and / or search, if asked), and play the design
-    out once per passenger seed."""
-    sim0 = MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
+def evaluate_map(agent, spec: PolicySpec, map_seed: int, seeds: list[int], cap: int) -> dict:
+    """Design one map (then polish / search, as `spec` says) and play it once per seed."""
+    sim0 = MiniMetroSim(map_seed=map_seed)
     result = agent.design(sim0)
-    design = result.sim
-    stats = polish = None
-    if polish_rounds > 0:
-        design, polish = agent.polish(sim0, design, rounds=polish_rounds, rng=random.Random(map_seed))
-    if search_rounds > 0:
-        design, stats = agent.improve(sim0, design, rounds=search_rounds, seed_rng=search_seed_rng(map_seed),
-                                      rng=random.Random(map_seed))
+    design, polish, search = result.sim, None, None
+    if spec.polish_rounds:
+        design, polish = agent.polish(sim0, design, rounds=spec.polish_rounds, rng=random.Random(map_seed))
+    if spec.search_rounds:
+        design, search = agent.improve(sim0, design, rounds=spec.search_rounds, seed_rng=search_seed_rng(map_seed),
+                                       rng=random.Random(map_seed))
     runs = [run_playout(design, seed, cap) for seed in seeds]
     return {
         "map": map_seed,
@@ -84,8 +79,8 @@ def evaluate_map(agent, map_seed: int, seeds: list[int], cap: int, search_rounds
         "trains": sum(len(l.trains) for l in design.lines),
         "forced": result.n_forced,
         "stranded": result.n_stranded,
-        "search": stats,   # what the search measured on its own seeds (start / final ticks, edits kept)
-        "polish": polish,  # what the survival estimate predicted (start / final ticks, edits kept)
+        "search": search,   # the search's own measurements (start / final ticks, edits kept)
+        "polish": polish,   # the survival estimate's prediction (start / final ticks, edits kept)
     }
 
 
@@ -95,29 +90,30 @@ _worker_agent = None
 def _init_worker(spec: PolicySpec):
     global _worker_agent
     import torch
-    torch.set_num_threads(1)  # one process per core; avoid oversubscription
+    torch.set_num_threads(1)  # one process per core
     _worker_agent = make_agent(spec)
 
 
-def _eval_map_in_worker(map_seed: int, seeds: list[int], cap: int, search_rounds: int,
-                        polish_rounds: int) -> dict:
-    return evaluate_map(_worker_agent, map_seed, seeds, cap, search_rounds, polish_rounds)
+def _eval_map_in_worker(spec: PolicySpec, map_seed: int, seeds: list[int], cap: int) -> dict:
+    return evaluate_map(_worker_agent, spec, map_seed, seeds, cap)
+
+
+def _pool(spec: PolicySpec, workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                               initializer=_init_worker, initargs=(spec,))
 
 
 def mirrored(sim: MiniMetroSim, flip_x: bool = True, flip_y: bool = False) -> MiniMetroSim:
-    """Copy of an undesigned map reflected across its center lines. Station order is kept,
-    so a policy that has learned concepts rather than positions makes the same decisions."""
-    from point import Point
-    from simulator import width, height
+    """An undesigned map reflected across its center lines, station order kept: a policy
+    that learned concepts rather than positions designs it the same way."""
     m = copy.deepcopy(sim)
     for s in m.stations:
-        s.pos = Point(width - s.x if flip_x else s.x, height - s.y if flip_y else s.y)
-        s.x, s.y = s.pos.x, s.pos.y
+        s.pos = Point(WIDTH - s.x if flip_x else s.x, HEIGHT - s.y if flip_y else s.y)
     return m
 
 
 def _mirror_check_in_worker(map_seed: int) -> tuple[bool, bool]:
-    sim = MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
+    sim = MiniMetroSim(map_seed=map_seed)
     base = _worker_agent.design(sim).actions
     return (_worker_agent.design(mirrored(sim, True, False)).actions == base,
             _worker_agent.design(mirrored(sim, False, True)).actions == base)
@@ -125,9 +121,7 @@ def _mirror_check_in_worker(map_seed: int) -> tuple[bool, bool]:
 
 def invariance(spec: PolicySpec, maps=BENCH_MAPS, workers: int | None = None) -> dict:
     """Share of maps whose design is unchanged by left-right / top-bottom mirroring."""
-    workers = default_workers() if workers is None else workers
-    with ProcessPoolExecutor(max_workers=max(workers, 1), mp_context=multiprocessing.get_context("spawn"),
-                             initializer=_init_worker, initargs=(spec,)) as pool:
+    with _pool(spec, max(workers or default_workers(), 1)) as pool:
         checks = list(pool.map(_mirror_check_in_worker, list(maps)))
     return {
         "left_right": float(np.mean([lr for lr, _ in checks])),
@@ -136,23 +130,18 @@ def invariance(spec: PolicySpec, maps=BENCH_MAPS, workers: int | None = None) ->
     }
 
 
-def run(spec: PolicySpec, maps=BENCH_MAPS, seeds=BENCH_SEEDS, cap: int = CAP,
-        workers: int | None = None, search_rounds: int = 0, polish_rounds: int = 0) -> dict:
-    """Evaluate `spec` on every map, optionally with `polish_rounds` of polishing by the survival
-    estimate and `search_rounds` of play-out search, in that order.
-    workers=0 runs in this process (handy for debugging)."""
+def run(spec: PolicySpec, maps=BENCH_MAPS, seeds=BENCH_SEEDS, cap: int = CAP, workers: int | None = None) -> dict:
+    """Evaluate `spec` on every map. workers=0 runs in this process (for debugging)."""
     maps, seeds = list(maps), list(seeds)
     workers = default_workers() if workers is None else workers
     if workers == 0:
         agent = make_agent(spec)
-        rows = [evaluate_map(agent, m, seeds, cap, search_rounds, polish_rounds) for m in maps]
+        rows = [evaluate_map(agent, spec, m, seeds, cap) for m in maps]
     else:
-        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
-                                 initializer=_init_worker, initargs=(spec,)) as pool:
-            rows = list(pool.map(_eval_map_in_worker, maps, repeat(seeds), repeat(cap), repeat(search_rounds),
-                                 repeat(polish_rounds)))
-    return {"spec": {**asdict(spec), "search_rounds": search_rounds, "polish_rounds": polish_rounds},
-            "cap": cap, "seeds": seeds, "maps": rows}
+        with _pool(spec, workers) as pool:
+            rows = list(pool.map(_eval_map_in_worker, [spec] * len(maps), maps, [seeds] * len(maps),
+                                 [cap] * len(maps)))
+    return {"spec": asdict(spec), "cap": cap, "seeds": seeds, "maps": rows}
 
 
 def map_scores(results: dict) -> dict[int, float]:
@@ -178,12 +167,8 @@ def summarize(results: dict) -> dict:
 
 
 def compare(results: dict, reference: dict) -> dict:
-    """Paired by map: geometric-mean survival ratio vs `reference`, with a 95% CI.
-
-    A map counts as a win/loss when the ratio differs from 1 by more than 1%; maps where
-    both reach the cap are ties. Raises if the two runs used different seeds or caps,
-    since then the comparison would not be paired.
-    """
+    """Geometric-mean survival ratio vs `reference`, paired by map, with a 95% CI. A map is
+    a win / loss when its ratio is more than 1% from 1. The runs must share seeds and cap."""
     if results["seeds"] != reference["seeds"] or results["cap"] != reference["cap"]:
         raise ValueError("results and reference used different passenger seeds or caps")
     a, b = map_scores(results), map_scores(reference)
@@ -230,6 +215,17 @@ def report(name: str, results: dict, reference: dict | None = None, reference_na
     return "\n".join(lines)
 
 
+def default_name(spec: PolicySpec) -> str:
+    name = "heuristic" if spec.kind == "heuristic" else os.path.basename(os.path.normpath(spec.ckpt))
+    if spec.mcts_sims:
+        name += f"_mcts{spec.mcts_sims}"
+    if spec.polish_rounds:
+        name += f"_polish{spec.polish_rounds}"
+    if spec.search_rounds:
+        name += f"_{'' if spec.screen_edits else 'plain'}search{spec.search_rounds}"
+    return name
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("policy", choices=["heuristic", "agent"])
@@ -242,29 +238,19 @@ def main():
                         help="results file to compare against, paired by map")
     parser.add_argument("--invariance", action="store_true",
                         help="also check whether mirrored maps get the same design")
-    parser.add_argument("--search", type=int, default=0, metavar="ROUNDS",
-                        help="polish each design with this many rounds of play-out search "
-                             "(8 edits per round, judged on seeds disjoint from the bench's); slow")
-    parser.add_argument("--plain-search", action="store_true",
-                        help="search plays edits drawn at random, not the ones survival.py rates best")
     parser.add_argument("--polish", type=int, default=0, metavar="ROUNDS",
-                        help="first polish each design with this many rounds of hill-climbing on the "
-                             "survival estimate (no play-outs)")
+                        help="polish each design on the survival estimate (no play-outs)")
+    parser.add_argument("--search", type=int, default=0, metavar="ROUNDS",
+                        help="then polish it by play-out search (slow)")
+    parser.add_argument("--plain-search", action="store_true",
+                        help="search plays random edits, not the ones the survival estimate rates best")
     args = parser.parse_args()
 
     spec = PolicySpec(args.policy, args.ckpt if args.policy == "agent" else None, args.mcts,
-                      screen_edits=not args.plain_search)
-    name = args.name or ("heuristic" if args.policy == "heuristic" else os.path.basename(os.path.normpath(args.ckpt)))
-    if args.mcts and not args.name:
-        name += f"_mcts{args.mcts}"
-    if args.polish and not args.name:
-        name += f"_polish{args.polish}"
-    if args.search and not args.name:
-        name += f"_{'plain' if args.plain_search else ''}search{args.search}"
-
+                      polish_rounds=args.polish, search_rounds=args.search, screen_edits=not args.plain_search)
+    name = args.name or default_name(spec)
     start = time.time()
-    results = run(spec, maps=BENCH_MAPS[:args.maps], workers=args.workers, search_rounds=args.search,
-                  polish_rounds=args.polish)
+    results = run(spec, maps=BENCH_MAPS[:args.maps], workers=args.workers)
     path = save(results, name)
     reference = None
     if os.path.exists(args.compare) and os.path.abspath(args.compare) != os.path.abspath(path):

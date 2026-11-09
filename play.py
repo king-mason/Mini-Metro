@@ -24,14 +24,13 @@ import random
 
 import pygame
 
-from rules import (MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE, ActionType, apply_action, crosses_network,
-                   is_legal)
-from heuristic import station_load_factors
-from simulator import MiniMetroSim, config
+from config import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE
+from metrics import station_load_factors
+from rules import ActionType, apply_action, crosses_network, is_legal
+from simulator import MiniMetroSim
 from visualizer import (BG_COLOR, GHOST, LINE_COLORS, MUTED, STATION_RADIUS, Visualizer, draw_dashed,
                         draw_network, draw_panel, line_color)
 
-NUM_STATIONS = 20
 ILLEGAL = (210, 60, 60)
 PICKED = (40, 180, 60)
 
@@ -242,12 +241,11 @@ def main():
     parser.add_argument("--map", type=int, default=1, help="map seed")
     args = parser.parse_args()
 
-    width, height = config["resolution"]
-    vis = Visualizer(width, height, mode="dev", caption="Mini Metro - Build Your Own")
+    vis = Visualizer(mode="dev", caption="Mini Metro - Build Your Own")
     vis.auto_next = None
     vis.next_label = "edit the design"
     vis.new_map(map=args.map, policy="you")
-    sim = MiniMetroSim(NUM_STATIONS, map_seed=args.map)
+    sim = MiniMetroSim(map_seed=args.map)
     rng = random.Random()
     try:
         while build_phase(sim, vis):

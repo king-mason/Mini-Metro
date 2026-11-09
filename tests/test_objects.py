@@ -26,7 +26,7 @@ def test_round_trip_returns_a_train_to_its_start(map_seed, seed):
     for line in lines_with_trains(random_legal_design(map_seed % 10_000, seed)):
         probe = Train(line)
         probe.advance(line.round_trip_ticks())
-        assert (probe.position, probe.direction, probe.progress, probe._at_station) == (0, 1, 0.0, True)
+        assert (probe.position, probe.direction, probe.progress, probe.at_station) == (0, 1, 0.0, True)
 
 
 @given(seeds, seeds)
@@ -37,7 +37,7 @@ def test_advance_matches_step_without_passengers(map_seed, seed):
         for _ in range(97):
             a.advance(1)
             b.step(sim.lines)   # stations are empty at tick 0, so step only moves
-        assert (a.position, a.direction, a.progress, a._at_station) == (b.position, b.direction, b.progress, b._at_station)
+        assert (a.position, a.direction, a.progress, a.at_station) == (b.position, b.direction, b.progress, b.at_station)
 
 
 @given(seeds, seeds)

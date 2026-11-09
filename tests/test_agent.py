@@ -1,4 +1,4 @@
-"""agent.py: the design loop, forced connections, the viewing hook, checkpoints."""
+"""agent.py: the design loop, forced connections (rules.py), the viewing hook, weights."""
 
 import copy
 
@@ -7,8 +7,8 @@ from hypothesis import given, strategies as st
 
 from agent import Agent
 from bench import mirrored
-from rules import is_legal
-from tests.helpers import NUM_STATIONS, crossing_pairs, fresh_map, heuristic_agent, heuristic_design
+from rules import connect_isolated, is_legal
+from tests.helpers import crossing_pairs, fresh_map, heuristic_agent, heuristic_design
 
 pytestmark = pytest.mark.slow
 map_indices = st.integers(min_value=0, max_value=99)
@@ -16,7 +16,7 @@ map_indices = st.integers(min_value=0, max_value=99)
 
 @pytest.fixture(scope="module")
 def untrained():
-    return Agent(num_stations=NUM_STATIONS, seed=0)
+    return Agent(seed=0)
 
 
 @given(st.integers(min_value=0, max_value=20))
@@ -51,7 +51,7 @@ def test_forced_connections_serve_every_station_legally(map_index, n_lines):
     for i, line in enumerate(sim.lines):
         line.index = i
     shown = []
-    forced, stranded = Agent._connect_isolated(sim, lambda action: shown.append(action))
+    forced, stranded = connect_isolated(sim, shown.append)
     assert len(shown) == forced
     assert crossing_pairs(sim) == []
     served = sum(any(s in l.stations for l in sim.lines) for s in sim.stations)
@@ -83,8 +83,8 @@ def test_on_step_returning_false_stops_the_calls():
 
 def test_checkpoint_round_trip(tmp_path, untrained):
     untrained.save(str(tmp_path / "ckpt"))
-    other = Agent(num_stations=NUM_STATIONS)
-    assert other.load(str(tmp_path / "ckpt"), verbose=False)
+    other = Agent()
+    assert other.load(str(tmp_path / "ckpt"))
     sim = fresh_map(10_006)
     assert other.design(sim).actions == untrained.design(sim).actions
-    assert not other.load(str(tmp_path / "missing"), verbose=False)
+    assert not other.load(str(tmp_path / "missing"))

@@ -4,7 +4,8 @@ import copy
 
 from hypothesis import given, strategies as st
 
-from simulator import MiniMetroSim, max_overcrowd_ticks, max_waiting, run_playout
+from config import MAX_OVERCROWD_TICKS, STATION_CAPACITY
+from simulator import MiniMetroSim, run_playout
 from tests.helpers import NUM_STATIONS, heuristic_design
 
 map_seeds = st.integers(min_value=0, max_value=10 ** 6)
@@ -54,5 +55,5 @@ def test_failure_rule():
         sim.step()
         assert sim.overcrowded_ticks >= last
         last = sim.overcrowded_ticks
-        assert sim.failed == (sim.overcrowded_ticks > max_overcrowd_ticks)
-    assert any(len(s.waiting) > max_waiting for s in sim.stations)
+        assert sim.failed == (sim.overcrowded_ticks > MAX_OVERCROWD_TICKS)
+    assert any(len(s.waiting) > STATION_CAPACITY for s in sim.stations)

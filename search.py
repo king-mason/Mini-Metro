@@ -1,14 +1,9 @@
-"""Local search over finished designs.
+"""Local search over finished designs: small edits (move or add a train, drop / extend /
+shift a line end, reverse a stretch of a line), kept when they help.
 
-Start from any complete design (e.g. the agent's) and propose small edits — move a train,
-add a train, drop / extend / shift a line end, reverse a stretch of a line.
-
-improve: score edits by real play-outs on fresh passenger seeds each round, and keep the best
-    edit if it beats the current design by more than the play-out noise, so every accepted
-    edit was measured to help on this map. A cheap estimate (survival.py) can pre-screen
-    which edits get played. This is how the agent adapts to a particular map; it costs
-    play-outs, not training.
-polish: hill-climb on a cheap estimate alone, with no play-outs.
+improve: judge edits by real play-outs on fresh seeds each round; keep the best one only if
+    it beats the current design by more than the noise.
+polish:  hill-climb on a cheap estimate (survival.py) alone, no play-outs.
 """
 
 from __future__ import annotations
@@ -21,8 +16,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from heuristic import NEIGHBOR_K_DEFAULT, neighbor_sets
-from rules import MAX_TRAINS, MAX_TRAINS_PER_LINE, apply_add_train, apply_extend, segments_cross
+from config import MAX_TRAINS, MAX_TRAINS_PER_LINE
+from metrics import neighbor_sets
+from rules import apply_add_train, apply_extend, segments_cross
 from simulator import MiniMetroSim
 
 EDITS = ("move_train", "add_train", "drop_end", "extend", "shift_end", "reverse")
@@ -142,43 +138,25 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
             seed_rng: random.Random | None = None, rng: random.Random | None = None,
             on_round=None, record: list | None = None, prescreen=None,
             pool: int = 40) -> tuple[MiniMetroSim, dict]:
-    """Batched hill-climb from the design `start` on the map `base`.
+    """Hill-climb from the design `start` on the map `base`.
 
-    score(sims, seeds) -> array (len(sims), len(seeds)) of ticks survived.
+    score(sims, seeds) -> (len(sims), len(seeds)) array of ticks survived.
 
-    Each round plays the current design and batch - 1 distinct edits of it on n_seeds fresh
-    passenger seeds (from seed_rng), and compares every edit with the current design seed by
-    seed, in log ticks. The best edit replaces the current design only if its mean gain is
-    more than min_gain (relative) and more than z standard errors, the noise estimated from
-    all of the round's edits together. Fresh seeds every round keep the search from fitting
-    a few seeds, and re-scoring the current design means a lucky winner is not trusted at
-    its lucky score.
+    Each round plays the current design and batch - 1 edits of it on n_seeds fresh seeds and
+    compares each edit with the current design seed by seed, in log ticks. The best edit is
+    kept if its mean gain beats both min_gain and z standard errors (noise pooled over the
+    round's edits). Re-scoring the current design each round means a lucky winner isn't
+    trusted at its lucky score.
 
-    z = 1 is calibrated on real games (16 maps x 10 rounds, each round's best edit re-measured
-    on 16 more seeds): the luckiest-of-7 bias is small (+0.007 log), so most best edits are
-    real gains and a strict gate mostly rejects them. Taking every best edit over 1% took 58%
-    of rounds, 8% of them truly worse; z = 1 takes 47%, 4% worse, for ~4% less total gain;
-    z = 2 takes none that are worse but gives up ~10% of the gain.
+    prescreen(spec) -> float: if given, draw `pool` edits and play the batch - 1 it rates best.
+    on_round(round, rounds, design, stats): called after each round; False stops early.
+    record: gets one dict per round ("current", "proposals", "ticks", "accepted").
 
-    Cost: rounds * batch designs, plus the starting design scored once more at the end.
-    stats["start"] / stats["final"] are mean ticks of the starting / returned design, each
-    on its own fresh seeds, so final / start is an honest (if noisy) estimate of the gain.
-
-    on_round(round, rounds, design, stats), if given, is called after each round with the
-    current design; returning False stops the search early.
-
-    record, if given, gets one dict per round (training data for an edit-value model):
-    "current" and each of "proposals" as [lines, trains] (+ edit name for proposals),
-    "ticks" (current first, then proposals; one row per design, one column per seed),
-    and "accepted" (index into proposals, or None).
-
-    prescreen(spec) -> float, if given, is a cheap estimate of a design's value (higher is
-    better): each round draws up to `pool` distinct edits and plays only the batch - 1 it
-    rates highest, so the play-out cost is unchanged.
+    stats["start"] / ["final"]: mean ticks of the start / result, each on its own fresh seeds.
     """
     rng = rng or random.Random()
     seed_rng = seed_rng or random.Random(rng.random())
-    nbrs = neighbor_sets(base, NEIGHBOR_K_DEFAULT)
+    nbrs = neighbor_sets(base)
     current = spec_of(start)
     accepted = Counter()
     stats = {"start": None, "final": None, "accepted": {}, "rounds": 0}
@@ -224,15 +202,11 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
 
 def polish(base: MiniMetroSim, start: MiniMetroSim, value, rounds: int = 30, pool: int = 40,
            rng: random.Random | None = None, on_round=None) -> tuple[MiniMetroSim, dict]:
-    """Hill-climb from `start` on value(spec) -> float (higher is better) alone: each round
-    draws up to `pool` edits and keeps the best if it beats the current design. No play-outs,
-    so nothing here is measured; with survival.SurvivalModel(base).log_ticks as `value` it
-    gained x1.70 over the heuristic on 48 bench maps (play-out search, 320 games: x1.58).
-
-    stats["start"] / stats["final"] are value() of the starting / returned design.
-    on_round works as in improve."""
+    """Hill-climb from `start` on value(spec) -> float alone: each round draws `pool` edits
+    and keeps the best if it beats the current design. Nothing is played, so nothing is
+    verified. stats["start"] / ["final"] are value() of the start / result."""
     rng = rng or random.Random()
-    nbrs = neighbor_sets(base, NEIGHBOR_K_DEFAULT)
+    nbrs = neighbor_sets(base)
     current = spec_of(start)
     best = value(current)
     accepted = Counter()

@@ -1,6 +1,5 @@
 """What the network sees and how it scores: the graph encoding of a design state, the
-per-action features, and the two torch modules (GNN state encoder, pair scorer).
-"""
+per-action features, and the two torch modules (GNN state encoder, pair scorer)."""
 
 import math
 from collections import Counter
@@ -11,82 +10,46 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GATv2Conv, global_max_pool, global_mean_pool
 
-from heuristic import (MAX_DIST, MAX_WAITING, NEIGHBOR_K_DEFAULT, RHO_CLAMP, STATION_TYPES,
-                       bend_cost, expected_demand_gain, expected_unreachable_demand,
-                       line_components, nearest_type_distance, close_neighbor_scarcity,
-                       neighbor_sets, station_load_factors)
-from rules import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE, ActionType
+from config import MAX_DIST, MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE, STATION_CAPACITY, TRAIN_CAPACITY
+from metrics import (RHO_CLAMP, STATION_TYPES, bend_cost, close_neighbor_scarcity, expected_demand_gain,
+                     expected_unreachable_demand, line_components, nearest_type_distance, neighbor_sets,
+                     station_load_factors)
+from rules import ActionType
 from simulator import MiniMetroSim
 
 NUM_ACTION_TYPES = len(ActionType)
 
-# State features: GNN-encoded graph embedding + projected global signals.
-# The sim depends only on distances and type counts, so the encoding carries no screen
-# coordinates and no type labels — only quantities that mean the same thing on every map.
-# - Per-station nodes carry: share of stations with its type, inbound demand per station
-#   of its type, total waiting, line-membership count, is-endpoint, distance to the
-#   station centroid, share of the map's types reachable from its component, expected
-#   unreachable demand, nearest unreachable destination distance, close-neighbor
-#   scarcity, the analytic load factor, and distance to the nearest same-type station.
-# - Edges are both built line segments and k-nearest-neighbor geometric links (so the
-#   network sees neighborhoods before any line exists). Each carries: distance, relative
-#   displacement (dx, dy), is-line flag, line one-hot, train count, load, at-capacity,
-#   and type relations — same type, sender's type not yet reachable from the receiver's
-#   component, same component.
-# - 9 global features (lines_used, disconnected, total_waiting, avg_line_len,
-#   expected unreachable demand, close-option scarcity, max load factor, design phase,
-#   trains remaining) feed the final projection alongside the pooled
-#   graph embedding. Phase matters because NOOP has no station embeddings: without it
-#   "stop building lines" and "stop adding trains" look identical to the network.
+# The encoding has no screen coordinates and no type labels, only quantities that mean the
+# same on every map (the game depends only on distances and type counts).
+#   nodes:   type share, inbound demand, waiting, lines through it, is an end, distance to
+#            the centroid, reachable types, unreachable demand and its distance, scarcity,
+#            load factor, distance to the nearest same-type station
+#   edges:   built segments and k-nearest-neighbor links, both directions: distance,
+#            displacement, is a segment, line one-hot, trains, load, at capacity, and type
+#            relations (same type, sender's type unreachable from receiver, same component)
+#   globals: lines used, unconnected stations, waiting, mean line length, unreachable demand,
+#            scarcity, worst load factor, design phase (so the two NOOPs differ), trains left
 NODE_FEAT_DIM = 12
-EDGE_FEAT_DIM = 1 + 2 + 1 + MAX_LINES + 3 + 3                         # = 10 + MAX_LINES
+EDGE_FEAT_DIM = 1 + 2 + 1 + MAX_LINES + 3 + 3
 GLOBAL_FEAT_DIM = 9
-# One of the 8 symmetries of the square, applied to edge displacements:
-# (x sign, y sign, swap axes). Training samples one per episode; evaluation uses identity.
+# A symmetry of the square applied to edge displacements: (x sign, y sign, swap axes).
 IDENTITY_AUG = (1.0, 1.0, False)
 STATE_FEAT_SIZE = 64  # GNN output dimension
 
-# Action representation (factorized scoring):
-#   An action is scored from the GNN node embeddings of the two stations it touches
-#   plus a small "aux" vector of action-level signals that are NOT per-node properties
-#   (and so aren't already captured by the node embeddings). Per-station context —
-#   type, waiting, reachability, scarcity — lives in the node embeddings, so we do NOT
-#   re-encode it here.
-# Station indices used (primary, secondary), via action_endpoints:
-#   EXTEND_LINE: primary = new station, secondary = line endpoint being extended
-#   NEW_LINE:    primary = station_a,  secondary = station_b
-#   ADD_TRAIN:   primary = line's first station, secondary = line's last station
-#   NOOP:        no stations (both embeddings zeroed)
-# Aux layout:
-#   action_type one-hot                                                     (= NUM_ACTION_TYPES)
-#   distance                                                                (= 1)
-#   bend_cost (EXTEND only)                                                 (= 1)
-#   resulting_line_load, extends_line_at_capacity                           (= 2)
-#   creates_transfer_station                                                (= 1)
-#   expected_demand_gain, coverage_gain, bridges_components                 (= 3)
+# An action is scored from the embeddings of the two stations it touches (see
+# action_endpoints) plus a few action-level features no single station carries: type
+# one-hot, distance, bend, resulting line load, at capacity, makes a transfer station,
+# demand and coverage gained, joins two components.
 ACTION_AUX_DIM = NUM_ACTION_TYPES + 8
 
 
 def build_graph(sim: MiniMetroSim, phase: str = "lines",
                  aug: tuple = IDENTITY_AUG) -> tuple[Data, torch.Tensor]:
-    """Construct a torch_geometric Data object representing the current sim state.
-
-    No screen coordinates and no type labels enter the encoding (see the feature notes
-    above NODE_FEAT_DIM), so it is exactly invariant to translating the map and to
-    relabeling station types. `aug` applies a reflection/rotation to the edge
-    displacements, the only orientation-dependent features, so training can teach the
-    network that a mirrored map is the same problem.
-
-    Returns (data, global_feats) where:
-      - data.x: (n_stations, NODE_FEAT_DIM)
-      - data.edge_index: (2, n_edges) [line segments and kNN links, both directions]
-      - data.edge_attr: (n_edges, EDGE_FEAT_DIM)
-      - global_feats: (GLOBAL_FEAT_DIM,)
-    """
+    """The state as a graph: (Data with x, edge_index, edge_attr; global features).
+    `aug` reflects / rotates the edge displacements, the only orientation-dependent features."""
     n = max(len(sim.stations), 1)
-    cap = MAX_WAITING
+    cap = STATION_CAPACITY
 
-    # Identify which stations are endpoints of any line (for is_endpoint feature)
     endpoint_ids: set = set()
     on_line_ids: set = set()
     for line in sim.lines:
@@ -100,8 +63,8 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
     centroid_x = sum(s.x for s in sim.stations) / n
     centroid_y = sum(s.y for s in sim.stations) / n
 
-    # Inbound demand per station of each type: every station sends one unit of demand,
-    # split over target types (sim.target_type_probs), shared by that type's stations.
+    # every station sends one unit of demand, split over target types and shared by each
+    # type's stations
     inbound = Counter()
     for station_idx in range(len(sim.stations)):
         for t, prob in sim.target_type_probs(station_idx).items():
@@ -123,7 +86,7 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
         expected_unreachable = expected_unreachable_demand(sim, station_idx, reachable)
         nearest_unreachable = nearest_type_distance(sim, station_idx, unreachable_types)
         scarcity = close_neighbor_scarcity(sim, station_idx)
-        rho = min(load_factors[station_idx], RHO_CLAMP) / RHO_CLAMP  # normalized load factor
+        rho = min(load_factors[station_idx], RHO_CLAMP) / RHO_CLAMP
         nearest_same_type = nearest_type_distance(sim, station_idx, {s.type})
         node_unreachable.append(expected_unreachable)
         node_scarcity.append(scarcity)
@@ -137,9 +100,7 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
             expected_unreachable, nearest_unreachable, scarcity, rho, nearest_same_type,
         ])
 
-    # Edges: line segments and k-nearest-neighbor links, each in both directions.
-    # A message flows src -> dst, so geometry and type relations describe the sender
-    # as seen from the receiving station.
+    # messages flow src -> dst, so each edge describes the sender as seen from the receiver
     sx, sy, swap = aug
     edge_src: list[int] = []
     edge_dst: list[int] = []
@@ -168,7 +129,7 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
         line_oh[line_idx % MAX_LINES] = 1.0
         n_trains_norm = len(line.trains) / MAX_TRAINS_PER_LINE
         line_waiting = sum(len(st.waiting) for st in line.stations)
-        load_raw = line_waiting / max(len(line.trains) * 6, 1)
+        load_raw = line_waiting / max(len(line.trains) * TRAIN_CAPACITY, 1)
         load_norm = min(load_raw, 5.0) / 5.0
         at_cap = 1.0 if load_raw >= 1.0 else 0.0
         line_part = line_oh + [n_trains_norm, load_norm, at_cap]
@@ -179,7 +140,7 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
             add_edge(idxs[k + 1], idxs[k], 1.0, line_part)
 
     no_line = [0.0] * (MAX_LINES + 3)
-    for dst, nbrs in enumerate(neighbor_sets(sim, NEIGHBOR_K_DEFAULT)):  # symmetric sets
+    for dst, nbrs in enumerate(neighbor_sets(sim)):
         for src in sorted(nbrs):
             add_edge(src, dst, 0.0, no_line)
 
@@ -193,12 +154,10 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
 
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
-    # Global features
     disconnected = n - len(on_line_ids)
     total_waiting = sum(len(s.waiting) for s in sim.stations)
     avg_line_len = (sum(len(l.stations) for l in sim.lines) / max(len(sim.lines), 1)) / n
-    # Worst connected-station load factor: how close the most-starved served station
-    # is to overcrowding. Ignores ∞ (unconnected) so it reflects throughput, not coverage.
+    # worst load factor among served stations (throughput, not coverage)
     connected_rho = [
         load_factors[i] for i in range(len(sim.stations))
         if load_factors[i] != float("inf")
@@ -220,7 +179,7 @@ def build_graph(sim: MiniMetroSim, phase: str = "lines",
 
 
 def resulting_line_stations(sim: MiniMetroSim, action: tuple):
-    """Read-only: returns (target_line_or_None, resulting_stations)."""
+    """(line the action changes or None, its stations afterwards)."""
     t = action[0]
     if t == ActionType.EXTEND_LINE:
         _, line_idx, endpoint_idx, new_idx = action
@@ -240,10 +199,8 @@ def resulting_line_stations(sim: MiniMetroSim, action: tuple):
 
 
 def action_endpoints(sim: MiniMetroSim, action: tuple) -> tuple[int, int | None]:
-    """Returns (primary_idx, secondary_idx_or_None).
-    EXTEND_LINE: primary = new station, secondary = endpoint being extended.
-    NEW_LINE:    primary = station_a,  secondary = station_b.
-    ADD_TRAIN:   primary = first station of line, secondary = last station of line."""
+    """(primary, secondary) station: EXTEND_LINE (new station, line end), NEW_LINE (a, b),
+    ADD_TRAIN (the line's first and last stations)."""
     t = action[0]
     if t == ActionType.EXTEND_LINE:
         _, line_idx, endpoint_idx, new_idx = action
@@ -259,24 +216,14 @@ def action_endpoints(sim: MiniMetroSim, action: tuple) -> tuple[int, int | None]
 
 
 def action_station_indices(sim: MiniMetroSim, action: tuple) -> tuple[int, int]:
-    """(primary_idx, secondary_idx) used to look up node embeddings.
-
-    Returns (-1, -1) for NOOP (no stations — embeddings are zeroed at scoring time).
-    For all other actions both indices are real station indices (see action_endpoints).
-    """
+    """Stations whose embeddings score the action; (-1, -1) for NOOP (zero embeddings)."""
     if action[0] == ActionType.NOOP:
         return -1, -1
     return action_endpoints(sim, action)
 
 
 def action_aux_features(sim: MiniMetroSim, action: tuple) -> torch.Tensor:
-    """Small action-level feature vector (ACTION_AUX_DIM).
-
-    Only signals that are NOT per-station properties — those already live in the
-    node embeddings and must not be re-encoded. What remains is the action type,
-    geometry of the proposed segment, line-level load, and the *pairwise* reachability
-    interaction (which is an exact computation worth handing the net directly).
-    """
+    """Action-level features (ACTION_AUX_DIM); per-station ones are in the embeddings."""
     t = action[0]
     type_oh = [0.0] * NUM_ACTION_TYPES
     type_oh[t.value] = 1.0
@@ -289,18 +236,17 @@ def action_aux_features(sim: MiniMetroSim, action: tuple) -> torch.Tensor:
     dist = p.pos.get_distance(s.pos) / MAX_DIST
     bend = bend_cost(sim, action) if t == ActionType.EXTEND_LINE else 0.0
 
-    # Resulting-line load + currently-at-capacity.
     target_line, resulting_stations = resulting_line_stations(sim, action)
     if resulting_stations:
         waiting_resulting = sum(len(st.waiting) for st in resulting_stations)
         n_trains = len(target_line.trains) if target_line is not None else 1
-        load = min(waiting_resulting / max(n_trains * 6, 1), 5.0) / 5.0
+        load = min(waiting_resulting / max(n_trains * TRAIN_CAPACITY, 1), 5.0) / 5.0
     else:
         load = 0.0
     if target_line is None:
         at_cap = 0.0
     else:
-        cur_load = sum(len(st.waiting) for st in target_line.stations) / max(len(target_line.trains) * 6, 1)
+        cur_load = sum(len(st.waiting) for st in target_line.stations) / max(len(target_line.trains) * TRAIN_CAPACITY, 1)
         at_cap = 1.0 if cur_load >= 1.0 else 0.0
 
     on_p = any(p in l.stations for l in sim.lines)
@@ -329,14 +275,8 @@ def action_aux_features(sim: MiniMetroSim, action: tuple) -> torch.Tensor:
 # ---- GNN state encoder ----
 
 class GNNStateEncoder(nn.Module):
-    """Encodes the station graph into per-station embeddings + a global context vector.
-
-    Two GATv2Conv layers with edge features produce one embedding per station (NOT
-    pooled — the per-node resolution is what the pair scorer indexes into). The context
-    vector projects the global design features together with mean- and max-pooled
-    station embeddings, so network-wide choices (stop here, which line gets a train)
-    see a learned summary of every station, not just the hand-made globals.
-    """
+    """Two GATv2 layers give one embedding per station; a context vector combines the global
+    features with mean- and max-pooled embeddings, for network-wide choices."""
     def __init__(
         self,
         node_dim: int = NODE_FEAT_DIM,
@@ -351,14 +291,8 @@ class GNNStateEncoder(nn.Module):
         self.global_proj = nn.Linear(global_dim + 2 * out_dim, out_dim)
 
     def forward(self, data, global_feats: torch.Tensor):
-        """data is a single Data or batched Batch. global_feats is (B, GLOBAL_FEAT_DIM)
-        for a Batch, or (GLOBAL_FEAT_DIM,) for a single Data.
-
-        Returns (node_embeds, g):
-          - node_embeds: (n_nodes, out_dim) — one row per station (batched: all graphs
-            concatenated; recover per-graph offsets via Batch.ptr).
-          - g: (out_dim,) for a single Data, or (B, out_dim) for a Batch.
-        """
+        """(per-station embeddings, context). For a Batch, embeddings are concatenated
+        (offsets in Batch.ptr) and the context is (B, out_dim)."""
         h = F.relu(self.conv1(data.x, data.edge_index, data.edge_attr))
         h = F.relu(self.conv2(h, data.edge_index, data.edge_attr))
         single = data.batch is None
@@ -373,13 +307,9 @@ class GNNStateEncoder(nn.Module):
 # ---- pair-scoring Q-network ----
 
 class PairScoringNet(nn.Module):
-    """Scores an action from the embeddings of the two stations it touches.
-
-    Inputs are the primary/secondary node embeddings (zeroed when an action has no
-    such station, e.g. NOOP), the global context vector, and a small action-level
-    aux vector. Output is a learned correction to the structural prior, in units of
-    log(ticks survived). Only differences between actions in the same state are trained.
-    """
+    """Q(s, a): a learned correction to the prior, in log(ticks survived), from the two
+    stations' embeddings, the context and the action features. Trained on differences
+    between actions in the same state only."""
     def __init__(self, node_dim: int = STATE_FEAT_SIZE, global_dim: int = STATE_FEAT_SIZE,
                  aux_dim: int = ACTION_AUX_DIM, hidden: int = 128):
         super().__init__()
@@ -390,8 +320,7 @@ class PairScoringNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
-        # Start at zero so an untrained net adds nothing: a fresh agent plays exactly the
-        # structural heuristic, and learning starts from that baseline instead of noise.
+        # zero output at first: an untrained agent plays exactly the heuristic
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 

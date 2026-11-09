@@ -1,7 +1,7 @@
 """Shared test setup.
 
-The game modules read config.yaml from the working directory at import time, so the tests
-run from the repository root wherever pytest is started. Hypothesis examples that play
+The tests run from the repository root (bench results and golden data are found from
+there) wherever pytest is started. Hypothesis examples that play
 games are slow, so the default profile has no deadline and fewer examples; run
 `pytest --hypothesis-profile=thorough` for a longer search.
 """

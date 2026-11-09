@@ -5,7 +5,6 @@ import copy
 import pygame
 import pytest
 
-from simulator import config
 from tests.helpers import fresh_map, heuristic_agent, heuristic_design
 from visualizer import SPEEDS, NextMap, Visualizer
 
@@ -16,7 +15,7 @@ def press(key):
 
 @pytest.fixture
 def vis():
-    v = Visualizer(*config["resolution"], mode="dev")
+    v = Visualizer(mode="dev")
     v.new_map(map=10_000, policy="test")
     yield v
     v.close()
@@ -79,7 +78,7 @@ def test_escape_quits(vis):
 
 
 def test_screenshot(vis, tmp_path, monkeypatch):
-    monkeypatch.setitem(config["paths"], "screenshots", str(tmp_path))
+    monkeypatch.setattr(vis, "screenshot_dir", str(tmp_path))
     vis.show_search(0, 3, heuristic_design(10_004).sim, None)
     path = vis.screenshot()
     assert path.startswith(str(tmp_path)) and pygame.image.load(path).get_size() == (vis.width, vis.height)

@@ -1,10 +1,8 @@
-"""Train the design agent with branch-and-compare, validated against the heuristic.
+"""Train the design agent (training.py), validating against the heuristic.
 
-Every episode is a new map. Every EVAL_EVERY episodes the current weights are scored on
-VAL_MAPS, paired with the heuristic on the same maps and passenger seeds, and the best
-ratio is kept in checkpoint_v4_best. VAL_MAPS are disjoint from the training maps
-(0..9999) and from bench.py's maps, so the final `python bench.py agent` report is not
-inflated by checkpoint selection.
+Every episode is a new map. Every EVAL_EVERY episodes the weights are scored on VAL_MAPS
+against the heuristic, and the best are kept in BEST_CKPT. VAL_MAPS are separate from the
+training and bench maps, so picking the best checkpoint doesn't inflate the bench.
 """
 
 import math
@@ -15,6 +13,7 @@ import numpy as np
 
 import bench
 from agent import Agent
+from training import Trainer
 
 NUM_EPISODES = 500
 ROLLING_WINDOW = 50
@@ -59,7 +58,7 @@ def plot(history: list[dict], evals: list[tuple[int, dict]], path: str = "traini
     plt.show()
 
 
-def train(agent: Agent, num_episodes: int, ckpt: str = CKPT, best_ckpt: str = BEST_CKPT):
+def train(trainer: Trainer, num_episodes: int, ckpt: str = CKPT, best_ckpt: str = BEST_CKPT):
     """Run training episodes on fresh maps, validating every EVAL_EVERY. Returns (history, evals)."""
     heuristic_val = bench.run(bench.PolicySpec("heuristic"), VAL_MAPS, VAL_SEEDS, workers=WORKERS)
     print(bench.report("heuristic on validation maps", heuristic_val))
@@ -68,28 +67,29 @@ def train(agent: Agent, num_episodes: int, ckpt: str = CKPT, best_ckpt: str = BE
     history: list[dict] = []
     evals: list[tuple[int, dict]] = []
     for episode in range(num_episodes):
-        stats = agent.train_episode(map_seed=map_rng.randrange(10_000))
+        stats = trainer.episode(map_seed=map_rng.randrange(10_000))
         history.append(stats)
         print(f"Episode {episode + 1:4d} | Map {stats['map_seed']:4d} | greedy {stats['ticks_greedy']:6.0f}"
-              f" | best found {stats['ticks_best']:6.0f} | accepted {stats['accepted']}/{agent.branch_rounds}"
+              f" | best found {stats['ticks_best']:6.0f} | accepted {stats['accepted']}/{trainer.config.branch_rounds}"
               f" | mean |adv| {stats['mean_abs_adv']:.3f} | loss {stats['loss']:.4f}", flush=True)
 
         if (episode + 1) % EVAL_EVERY == 0:
-            agent.save(ckpt)
+            trainer.save(ckpt)
             val = bench.run(bench.PolicySpec("agent", ckpt=ckpt), VAL_MAPS, VAL_SEEDS, workers=WORKERS)
             c = bench.compare(val, heuristic_val)
             evals.append((episode + 1, c))
             print(f"  >> VAL vs heuristic ({c['n']} maps): x{c['ratio']:.3f} [95% CI {c['lo']:.3f}, {c['hi']:.3f}]"
                   f" | better on {c['wins']:.0%}, worse on {c['losses']:.0%}", flush=True)
-            agent.save_if_best(math.log(c["ratio"]), path=best_ckpt)
+            trainer.save_if_best(math.log(c["ratio"]), path=best_ckpt)
     return history, evals
 
 
 def main():
-    agent = Agent(num_stations=20, workers=WORKERS)
-    agent.load(CKPT)
+    agent = Agent(workers=WORKERS)
+    trainer = Trainer(agent)
+    trainer.load(CKPT)
     try:
-        history, evals = train(agent, NUM_EPISODES)
+        history, evals = train(trainer, NUM_EPISODES)
     finally:
         agent.close()
 
@@ -97,10 +97,9 @@ def main():
 
     # ---- final visualized run with the best checkpoint (more: python run_visual.py) ----
     from run_visual import watch
-    from simulator import config
     from visualizer import Visualizer
     agent.load(BEST_CKPT)
-    vis = Visualizer(*config["resolution"])
+    vis = Visualizer()
     try:
         watch(agent, vis, [random.randrange(10_000)], policy=BEST_CKPT)
     except SystemExit:

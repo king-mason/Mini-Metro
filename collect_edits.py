@@ -26,7 +26,7 @@ EVAL_SEEDS = 8
 
 def collect_map(agent: Agent, map_seed: int, rounds: int) -> dict:
     start = time.time()
-    sim0 = MiniMetroSim(agent.num_stations, map_seed=map_seed)
+    sim0 = MiniMetroSim(map_seed=map_seed)
     heuristic = agent.design(sim0).sim
     seed_rng = random.Random(10_000_000 + map_seed)
     log: list = []
@@ -39,7 +39,7 @@ def collect_map(agent: Agent, map_seed: int, rounds: int) -> dict:
         "final": [spec_of(final).lines, spec_of(final).trains],
         "rounds": log,
         "stats": stats,
-        "eval": agent.playout_ticks([heuristic, final], eval_seeds).tolist(),
+        "eval": agent.playouts.ticks([heuristic, final], eval_seeds).tolist(),
         "secs": time.time() - start,
     }
 
@@ -61,8 +61,7 @@ def main():
     todo = [m for m in range(first, last) if m not in done]
     print(f"{len(done)} maps already in {args.out}; collecting {len(todo)}", flush=True)
 
-    agent = Agent(num_stations=bench.NUM_STATIONS, use_q=False, workers=args.workers,
-                  screen_edits=False)   # random edits: unbiased training data
+    agent = Agent(use_q=False, workers=args.workers, screen_edits=False)   # random edits: unbiased data
     try:
         with open(args.out, "a") as f:
             for i, m in enumerate(todo, 1):

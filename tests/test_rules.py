@@ -6,8 +6,9 @@ import pytest
 from hypothesis import given, strategies as st
 
 from point import Point
-from rules import (MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE, ActionType, action_segments, apply_action,
-                   can_add_train, crosses_network, is_legal, line_segments, segments_cross)
+from config import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE
+from rules import (ActionType, action_segments, apply_action, apply_add_train, can_add_train, crosses_network,
+                   is_legal, line_segments, segments_cross)
 from tests.helpers import crossing_pairs, fresh_map, random_action, random_legal_design
 
 coord = st.integers(min_value=-50, max_value=50)
@@ -91,7 +92,7 @@ def test_line_and_train_limits():
     assert not is_legal(sim, (ActionType.NEW_LINE, *next(p for p in pairs)))
     # a two-station line has one segment, so it can hold only its first train
     assert not can_add_train(sim, 0)
-    assert apply_action(sim, (ActionType.ADD_TRAIN, 0))["train"] is None
+    assert apply_add_train(sim, 0) is None and len(sim.lines[0].trains) == 1
 
 
 # ---- applying actions ----

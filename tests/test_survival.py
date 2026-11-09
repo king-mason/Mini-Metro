@@ -75,7 +75,7 @@ def test_train_loads_match_a_played_game():
     index = {id(s): i for i, s in enumerate(sim.stations)}
     seen = defaultdict(float)
     while sim.time < 1100:
-        stopping = [(li, t) for li, line in enumerate(sim.lines) for t in line.trains if t._at_station]
+        stopping = [(li, t) for li, line in enumerate(sim.lines) for t in line.trains if t.at_station]
         sim.step()
         assert not sim.failed
         if sim.time > 400:

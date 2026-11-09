@@ -16,13 +16,13 @@ import random
 
 import bench
 from agent import Agent
-from simulator import MiniMetroSim, config
+from simulator import MiniMetroSim
 from visualizer import NextMap, Visualizer
 
 
 def episode(agent: Agent, vis: Visualizer, map_seed: int, search_rounds: int, rng: random.Random):
     """Design one map on screen, polish it with search, and play it until the viewer moves on."""
-    sim0 = MiniMetroSim(agent.num_stations, map_seed=map_seed)
+    sim0 = MiniMetroSim(map_seed=map_seed)
     design = agent.design(sim0, on_step=vis.show_design_step).sim
     if search_rounds > 0:
         vis.show_search(0, search_rounds, design, None)
@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--heuristic", action="store_true", help="structural prior only (no learned Q)")
     args = parser.parse_args()
 
-    agent = Agent(num_stations=bench.NUM_STATIONS, use_q=not args.heuristic,
+    agent = Agent(use_q=not args.heuristic,
                   workers=bench.default_workers() if args.search else 0)
     policy = "heuristic"
     if not args.heuristic:
@@ -77,8 +77,7 @@ def main():
     rng = random.Random()
     maps = ([args.map + i for i in range(args.maps)] if args.map is not None
             else [rng.randrange(10_000) for _ in range(args.maps)])
-    width, height = config["resolution"]
-    vis = Visualizer(width, height, mode="dev" if args.dev else "showcase")
+    vis = Visualizer(mode="dev" if args.dev else "showcase")
     try:
         watch(agent, vis, maps, args.search, policy)
     except SystemExit:

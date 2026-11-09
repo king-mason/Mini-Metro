@@ -1,16 +1,8 @@
-"""Genetic algorithm for Mini Metro network design.
+"""Genetic algorithm for network design: an alternative to the agent (run via ga_main.py).
 
-Improvements over the initial version:
-  1. Neighbor graph: only geographically sensible connections are allowed
-     (k-nearest OR within a distance threshold, ensuring every station has
-     at least min_neighbors reachable).
-  2. Graph-constrained genomes: lines are random walks in the neighbor graph;
-     insertion mutations only place stations at valid neighbor positions.
-  3. Structural fitness: each genome is replayed as a sequence of RL actions
-     so that structural_reward (bends, isolation, reach, coverage, connection
-     cost) contributes directly to fitness alongside the simulation
-     ticks-survived signal. Steps that break the rules (rules.py: crossings,
-     train limits) are skipped.
+Genomes are lines (random walks on a neighbor graph) plus trains per line. Fitness is ticks
+survived in play-outs plus the structural prior of the genome's moves; moves that break
+the rules (rules.py) are skipped.
 """
 
 from __future__ import annotations
@@ -22,14 +14,12 @@ import random
 from dataclasses import dataclass, field
 
 import numpy as np
-import yaml
 
-from heuristic import MAX_DIST, structural_reward
-from rules import MAX_TRAINS, MAX_TRAINS_PER_LINE, ActionType, apply_action, is_legal
-from simulator import MiniMetroSim, max_lines, run_playout
-
-with open("config.yaml") as f:
-    _config = yaml.safe_load(f)
+from config import MAX_DIST, MAX_TRAINS, MAX_TRAINS_PER_LINE
+from config import MAX_LINES as max_lines
+from heuristic import structural_reward
+from rules import ActionType, apply_action, is_legal
+from simulator import MiniMetroSim, run_playout
 
 
 # ---------------------------------------------------------------------------

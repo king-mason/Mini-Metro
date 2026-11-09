@@ -27,11 +27,11 @@ import time
 
 import pygame
 
-from heuristic import station_load_factors
+from config import HEIGHT, MAX_OVERCROWD_TICKS, SCREENSHOT_DIR, STATION_CAPACITY, WIDTH
+from metrics import station_load_factors
 from objects import StationType
 from rules import ActionType, action_label, action_segments
-from simulator import (MiniMetroSim, config, current_spawn_chance, current_spawn_interval,
-                       max_overcrowd_ticks, max_waiting)
+from simulator import MiniMetroSim, current_spawn_chance, current_spawn_interval
 
 LINE_COLORS = [
     (220,  50,  50),  # red
@@ -54,7 +54,7 @@ PASSENGER_R = 5
 LINE_WIDTH = 5
 LINE_GAP = 7             # spacing between parallel lines sharing a segment
 TRAIN_LEN, TRAIN_WID = 30, 16
-WAITING_SLOTS = 12       # passenger slots drawn around a station; matches stations.capacity
+WAITING_SLOTS = STATION_CAPACITY   # passenger slots drawn around a station
 FONT_SIZE = 16
 SMALL_FONT_SIZE = 13
 
@@ -207,7 +207,7 @@ def draw_stations(surface, sim: MiniMetroSim, font=None, outlines: dict[int, tup
     outlines = outlines or {}
     for i, station in enumerate(sim.stations):
         n_waiting = len(station.waiting)
-        crowded = n_waiting > max_waiting
+        crowded = n_waiting > STATION_CAPACITY
         outline = ALERT if crowded else outlines.get(i, STATION_OUTLINE)
         fill = _heat(loads[i]) if loads is not None and loads.get(i, 0) != float("inf") else (255, 255, 255)
         draw_shape(surface, station.x, station.y, station.type, fill=fill, outline=outline, width=3)
@@ -289,7 +289,8 @@ def draw_panel(surface, font, rows, pos, anchor="topleft", alpha=225, pad=8):
 # ---- viewer ----
 
 class Visualizer:
-    def __init__(self, width: int, height: int, mode: str = "showcase", caption: str = "Mini Metro Sim"):
+    def __init__(self, width: int = WIDTH, height: int = HEIGHT, mode: str = "showcase",
+                 caption: str = "Mini Metro Sim", screenshot_dir: str = SCREENSHOT_DIR):
         pygame.init()
         self.surface = pygame.display.set_mode((width, height))
         pygame.display.set_caption(caption)
@@ -298,6 +299,7 @@ class Visualizer:
         self.big_font = pygame.font.SysFont("menlo,dejavusansmono,monospace", 26, bold=True)
         self.clock = pygame.time.Clock()
         self.width, self.height = width, height
+        self.screenshot_dir = screenshot_dir
 
         self.dev = mode == "dev"
         self.auto_design = not self.dev       # showcase: design steps advance by themselves
@@ -422,7 +424,7 @@ class Visualizer:
                 return "next"
             if sim.failed:
                 crowded = [f"{s.type.name.lower()}{f' #{i}' if self.dev else ''}"
-                           for i, s in enumerate(sim.stations) if len(s.waiting) > max_waiting]
+                           for i, s in enumerate(sim.stations) if len(s.waiting) > STATION_CAPACITY]
                 headline = f"Game over at tick {sim.time}: {' and '.join(crowded)} station overflowed"
             else:
                 headline = f"Reached the {max_ticks}-tick limit"
@@ -455,7 +457,7 @@ class Visualizer:
         return commands
 
     def screenshot(self) -> str:
-        folder = config.get("paths", {}).get("screenshots", "screenshots/")
+        folder = self.screenshot_dir
         os.makedirs(folder, exist_ok=True)
         name = f"map{self.info.get('map', 'x')}_ep{self.episode}_{time.strftime('%H%M%S')}.png"
         path = os.path.join(folder, name)
@@ -531,9 +533,9 @@ class Visualizer:
         title = "   ".join(f"{k} {v}" for k, v in info.items() if v is not None)
         rows = [title, (self.stage, HUD_COLOR)]
         if sim.time > 0:
-            danger = sim.overcrowded_ticks / max_overcrowd_ticks
+            danger = sim.overcrowded_ticks / MAX_OVERCROWD_TICKS
             rows.append((f"tick {sim.time:6d}   delivered {sim.delivered:6d}   speed {SPEEDS[self.speed]}x"
-                         f"   overcrowding {sim.overcrowded_ticks}/{max_overcrowd_ticks}",
+                         f"   overcrowding {sim.overcrowded_ticks}/{MAX_OVERCROWD_TICKS}",
                          ALERT if danger > 0.5 else HUD_COLOR))
         if self.dev:
             waiting = sum(len(s.waiting) for s in sim.stations)
