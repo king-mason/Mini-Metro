@@ -103,10 +103,9 @@ class MiniMetroSim:
         return stations
     
     def target_type_probs(self, station_idx) -> dict[StationType, float]:
-        """Expected target distribution for passengers spawned at station_idx.
-
-        Station.spawn_passenger samples from the station type list with duplicates,
-        excluding the origin type, so common station types are more likely targets.
+        """Target distribution for passengers spawned at station_idx: each other type in
+        proportion to its number of stations, so common types are more likely targets.
+        step() draws targets from exactly this.
         """
         station = self.stations[station_idx]
         counts = Counter(s.type for s in self.stations if s.type != station.type)
@@ -141,8 +140,8 @@ class MiniMetroSim:
             for i, s in enumerate(self.stations):
                 if self.rng.random() < current_spawn_chance(self.time):
                     probs = self.target_type_probs(i)
-                    weights = [probs[t] for t in station_types]
-                    s.spawn_passenger(station_types, weights=weights, current_time=self.time,
+                    types = list(probs)
+                    s.spawn_passenger(types, weights=[probs[t] for t in types], current_time=self.time,
                                       rng=self.rng)
 
         for line in self.lines:

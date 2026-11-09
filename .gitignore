@@ -30,4 +30,4 @@ build/
 dist/
 *.egg-info/
 # Generated datasets (collect_edits.py)
-data/
+/data/

@@ -5,7 +5,6 @@ takes, and how many riders each train carries out of each station.
 """
 
 import math
-import random
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -20,19 +19,19 @@ seeds = st.integers(min_value=0, max_value=10 ** 6)
 
 
 def test_target_probs_match_the_spawner():
-    """The model's destination odds are the ones MiniMetroSim.step actually draws."""
-    sim = fresh_map(3)
-    types = [s.type for s in sim.stations]
-    rng = random.Random(0)
-    for i in (0, 7):
-        probs = sim.target_type_probs(i)
-        station = sim.stations[i]
-        station.waiting.clear()
-        for _ in range(20_000):
-            station.spawn_passenger(types, weights=[probs[t] for t in types], rng=rng)
-        seen = Counter(p.target_type for p in station.waiting)
-        for t, p in target_probs(sim, i).items():
-            assert abs(seen[t] / 20_000 - p) < 0.01
+    """The model's destination odds are the ones MiniMetroSim.step actually draws: a map with
+    no lines (nobody leaves), passengers pooled by the type of the station they spawned at."""
+    sim = fresh_map(3)                   # 11 circles, 5 squares, 2 triangles, a lemon, a rhombus
+    sim.set_passenger_seed(0)
+    for _ in range(CAP_TICKS):
+        sim.step()
+    for origin in {s.type for s in sim.stations}:
+        at = [i for i, s in enumerate(sim.stations) if s.type == origin]
+        seen = Counter(p.target_type for i in at for p in sim.stations[i].waiting)
+        total = sum(seen.values())
+        assert set(seen) <= set(target_probs(sim, at[0]))
+        for t, p in target_probs(sim, at[0]).items():
+            assert abs(seen[t] / total - p) < 4 * math.sqrt(p * (1 - p) / total) + 1e-3
 
 
 @given(map_seeds, seeds)

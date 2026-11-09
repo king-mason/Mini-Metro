@@ -13,10 +13,11 @@ station. From those:
 The game is lost once station-ticks over capacity pass max_overcrowd_ticks; the estimate
 adds up the expected overcrowded time as spawning ramps up and returns the tick it runs out.
 
-On 500 training maps it ranks the designs a search tries by real survival with spearman
-0.93, and ranks the edits within one search round at 0.77 (the measured noise ceiling is
-~0.95), with the best edit in its top 3 88% of the time. The absolute ticks are only
-roughly right; use it to compare designs on one map.
+On 500 training maps it ranked the designs a search tries by real survival with spearman
+0.93, and the edits within one search round at 0.77 (the measured noise ceiling is ~0.95),
+with the best edit in its top 3 88% of the time (measured before simulator.step drew
+targets by plain type share; then a type's odds went as its station count squared). The
+absolute ticks are only roughly right; use it to compare designs on one map.
 """
 
 from __future__ import annotations
@@ -38,13 +39,8 @@ CUM_SPAWNED = np.cumsum(SPAWN_RATE)
 
 def target_probs(sim: MiniMetroSim, i: int) -> dict:
     """The chance that a passenger spawned at station i wants each station type, as
-    MiniMetroSim.step draws it: one entry per station, weighted by target_type_probs, so a
-    type's chance goes as its station count squared. Keep in step with simulator.step."""
-    w = defaultdict(float)
-    for t, p in sim.target_type_probs(i).items():
-        w[t] = p * sum(s.type == t for s in sim.stations)
-    total = sum(w.values())
-    return {t: v / total for t, v in w.items() if v} if total else {}
+    MiniMetroSim.step draws it (target_type_probs), without the types it never picks."""
+    return {t: p for t, p in sim.target_type_probs(i).items() if p}
 
 
 def segment_ticks(dist: float) -> int:
