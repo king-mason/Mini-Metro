@@ -29,3 +29,5 @@ debug_state.json
 build/
 dist/
 *.egg-info/
+# Generated datasets (collect_edits.py)
+data/

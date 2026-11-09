@@ -4,6 +4,7 @@ The hill-climb is tested with fake scorers (no games), so its logic is checked e
 what it plays each round, when it accepts, and what it reports.
 """
 
+import math
 import random
 
 import numpy as np
@@ -11,7 +12,7 @@ from hypothesis import given, strategies as st
 
 from bench import BENCH_SEEDS
 from heuristic import NEIGHBOR_K_DEFAULT, neighbor_sets
-from search import Spec, build, improve, propose, spec_of, valid
+from search import Spec, build, improve, polish, propose, spec_of, valid
 from simulator import run_playout
 from tests.helpers import crossing_pairs, fresh_map, heuristic_design
 
@@ -156,3 +157,51 @@ def test_on_round_can_stop_the_search():
     _, stats = improve(base, design, FakeScorer(trains), rounds=10,
                        on_round=lambda *a: calls.append(a[0]) or False)
     assert calls == [1] and stats["rounds"] == 1
+
+
+def test_record_logs_every_round():
+    base, design = map_and_design(2)
+    log = []
+    result, stats = improve(base, design, FakeScorer(trains, noise=0.02), rounds=3, batch=5, record=log,
+                            rng=random.Random(0))
+    assert len(log) == stats["rounds"] == 3
+    for r in log:
+        assert len(r["proposals"]) == 4 and np.array(r["ticks"]).shape == (5, 4)
+        assert all(valid(Spec(lines, n_trains), base) for lines, n_trains, _ in r["proposals"])
+    kept = [r for r in log if r["accepted"] is not None]
+    assert sum(stats["accepted"].values()) == len(kept)
+    if kept:
+        lines, n_trains, _ = kept[-1]["proposals"][kept[-1]["accepted"]]
+        assert spec_of(result) == Spec(lines, n_trains)
+
+
+# ---- pre-screening and play-out-free polishing ----
+
+@given(map_indices, seeds)
+def test_prescreen_plays_the_best_rated_edits_at_the_same_cost(map_index, seed):
+    base, design = map_and_design(map_index)
+    scorer = FakeScorer(trains, noise=0.05, seed=seed)
+    rated = []
+
+    def rate(spec):
+        rated.append(spec)
+        return trains(spec)
+
+    rounds, batch = 3, 8
+    improve(base, design, scorer, rounds=rounds, batch=batch, rng=random.Random(seed), prescreen=rate, pool=30)
+    assert sum(len(sims) for sims, _ in scorer.calls) <= rounds * batch + 1
+    assert len(rated) > rounds * (batch - 1)                 # it rated more edits than it played
+    for sims, _ in scorer.calls[:-1]:
+        played = [trains(spec) for spec in sims[1:]]
+        assert len(played) == batch - 1 and played == sorted(played, reverse=True)
+
+
+@given(map_indices, seeds)
+def test_polish_only_climbs(map_index, seed):
+    base, design = map_and_design(map_index)
+    result, stats = polish(base, design, lambda spec: math.log(trains(spec)), rounds=8, rng=random.Random(seed))
+    assert valid(spec_of(result), base)
+    assert stats["final"] >= stats["start"] == math.log(trains(spec_of(design)))
+    assert stats["final"] == math.log(trains(spec_of(result)))
+    flat, flat_stats = polish(base, design, lambda spec: 0.0, rounds=4, rng=random.Random(seed))
+    assert spec_of(flat) == spec_of(design) and flat_stats["accepted"] == {}

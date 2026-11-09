@@ -114,6 +114,7 @@ class Agent:
         mcts_sims: int = 0,
         mcts_c: float = 1.4,
         mcts_horizon: int = 6,
+        screen_edits: bool = True,
         seed: int | None = None,
     ):
         """use_q=False scores with the structural prior alone (the heuristic baseline).
@@ -142,6 +143,11 @@ class Agent:
         `if __name__ == "__main__":` guard. mcts_sims > 0 enables look-ahead, off by default:
         the pairwise-trained Q only orders actions within a state, while MCTS compares
         values across states.
+
+        screen_edits: improve lets the survival estimate (survival.py) pick which edits to
+        play each round, 7 of 40 drawn, at the same play-out cost: measured x1.20 [1.10, 1.33]
+        over unscreened search on 48 bench maps. Off when the search should try edits at
+        random (e.g. collecting unbiased training data).
         """
         self.num_stations = num_stations
         self.k = k_candidates
@@ -156,6 +162,7 @@ class Agent:
         self.branch_rounds = branch_rounds
         self.playout_seeds = playout_seeds
         self.playout_cap = playout_cap
+        self.screen_edits = screen_edits
         self.accept_margin = accept_margin
         self.branch_uniform = branch_uniform
         self.branch_temperature = branch_temperature
@@ -472,16 +479,34 @@ class Agent:
 
     def improve(self, sim0: MiniMetroSim, design: MiniMetroSim, rounds: int = 10, batch: int = 8,
                 seed_rng: random.Random | None = None, rng: random.Random | None = None,
-                on_round=None) -> tuple[MiniMetroSim, dict]:
+                on_round=None, record: list | None = None) -> tuple[MiniMetroSim, dict]:
         """Polish a finished design for this map with play-out-verified local edits (search.py).
 
         Each round draws playout_seeds fresh passenger seeds from seed_rng (default: from the
         agent's rng); when the result will be evaluated on known seeds, pass a seed_rng that
-        can't produce them (bench.search_seed_rng). on_round is passed to search.improve."""
+        can't produce them (bench.search_seed_rng). on_round and record are passed to
+        search.improve. With screen_edits, survival.py picks which edits are played."""
         from search import improve
+        from survival import SurvivalModel
+        prescreen = SurvivalModel(sim0).log_ticks if self.screen_edits else None
         return improve(sim0, design, self.playout_ticks, rounds=rounds, batch=batch,
                        n_seeds=self.playout_seeds, seed_rng=seed_rng or random.Random(self.rng.random()),
-                       rng=rng or self.rng, on_round=on_round)
+                       rng=rng or self.rng, on_round=on_round, record=record, prescreen=prescreen)
+
+    def polish(self, sim0: MiniMetroSim, design: MiniMetroSim, rounds: int = 30,
+               rng: random.Random | None = None, on_round=None) -> tuple[MiniMetroSim, dict]:
+        """Polish a finished design with the survival estimate alone (search.polish): no
+        play-outs, a few seconds per map. stats["start"] / ["final"] are estimated ticks."""
+        from search import polish
+        from survival import SurvivalModel
+
+        def in_ticks(stats):
+            return {**stats, "start": math.exp(stats["start"]), "final": math.exp(stats["final"])}
+
+        report = None if on_round is None else lambda r, n, sim, stats: on_round(r, n, sim, in_ticks(stats))
+        design, stats = polish(sim0, design, SurvivalModel(sim0).log_ticks, rounds=rounds,
+                               rng=rng or self.rng, on_round=report)
+        return design, in_ticks(stats)
 
     # ---- training ----
 

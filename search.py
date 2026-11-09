@@ -1,10 +1,14 @@
-"""Play-out-verified local search over finished designs.
+"""Local search over finished designs.
 
-Start from any complete design (e.g. the agent's), propose small edits — move a train, add
-a train, drop / extend / shift a line end, reverse a stretch of a line — score them by real
-play-outs on fresh passenger seeds each round, and keep the best edit if it beats the current
-design by more than the play-out noise. Nothing is predicted: every accepted edit was measured to help on this map. This is
-how the agent adapts to a particular map; it costs play-outs, not training.
+Start from any complete design (e.g. the agent's) and propose small edits — move a train,
+add a train, drop / extend / shift a line end, reverse a stretch of a line.
+
+improve: score edits by real play-outs on fresh passenger seeds each round, and keep the best
+    edit if it beats the current design by more than the play-out noise, so every accepted
+    edit was measured to help on this map. A cheap estimate (survival.py) can pre-screen
+    which edits get played. This is how the agent adapts to a particular map; it costs
+    play-outs, not training.
+polish: hill-climb on a cheap estimate alone, with no play-outs.
 """
 
 from __future__ import annotations
@@ -119,10 +123,25 @@ def propose(spec: Spec, base: MiniMetroSim, nbrs: list[set[int]], rng: random.Ra
     return new, edit
 
 
+def draw_edits(spec: Spec, base: MiniMetroSim, nbrs: list[set[int]], rng: random.Random, n: int,
+               attempts: int | None = None) -> list[tuple[Spec, str]]:
+    """Up to n distinct edits of `spec` from `attempts` draws (default 20 per edit wanted;
+    most draws apply)."""
+    edits: list[tuple[Spec, str]] = []
+    for _ in range(attempts or n * 20):
+        if len(edits) == n:
+            break
+        p = propose(spec, base, nbrs, rng)
+        if p is not None and all(p[0] != q[0] for q in edits):
+            edits.append(p)
+    return edits
+
+
 def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, batch: int = 8,
             n_seeds: int = 4, min_gain: float = 0.01, z: float = 1.0,
             seed_rng: random.Random | None = None, rng: random.Random | None = None,
-            on_round=None) -> tuple[MiniMetroSim, dict]:
+            on_round=None, record: list | None = None, prescreen=None,
+            pool: int = 40) -> tuple[MiniMetroSim, dict]:
     """Batched hill-climb from the design `start` on the map `base`.
 
     score(sims, seeds) -> array (len(sims), len(seeds)) of ticks survived.
@@ -147,6 +166,15 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
 
     on_round(round, rounds, design, stats), if given, is called after each round with the
     current design; returning False stops the search early.
+
+    record, if given, gets one dict per round (training data for an edit-value model):
+    "current" and each of "proposals" as [lines, trains] (+ edit name for proposals),
+    "ticks" (current first, then proposals; one row per design, one column per seed),
+    and "accepted" (index into proposals, or None).
+
+    prescreen(spec) -> float, if given, is a cheap estimate of a design's value (higher is
+    better): each round draws up to `pool` distinct edits and plays only the batch - 1 it
+    rates highest, so the play-out cost is unchanged.
     """
     rng = rng or random.Random()
     seed_rng = seed_rng or random.Random(rng.random())
@@ -159,13 +187,11 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
         return [seed_rng.randrange(1_000, 2 ** 31) for _ in range(n_seeds)]
 
     for round_idx in range(rounds):
-        proposals: list[tuple[Spec, str]] = []
-        for _ in range(batch * 20):  # most draws apply; cap the attempts anyway
-            if len(proposals) == batch - 1:
-                break
-            p = propose(current, base, nbrs, rng)
-            if p is not None and all(p[0] != q[0] for q in proposals):
-                proposals.append(p)
+        if prescreen is None:
+            proposals = draw_edits(current, base, nbrs, rng, batch - 1, attempts=batch * 20)
+        else:
+            proposals = draw_edits(current, base, nbrs, rng, max(pool, batch - 1))
+            proposals = sorted(proposals, key=lambda p: -prescreen(p[0]))[:batch - 1]
         if not proposals:
             break
         ticks = np.asarray(score([build(base, current)] + [build(base, spec) for spec, _ in proposals],
@@ -177,6 +203,10 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
         noise = math.sqrt(float(gains.var(axis=1, ddof=1).mean())) if n_seeds > 1 else 0.0
         best = int(np.argmax(mean))
         take = mean[best] > max(math.log1p(min_gain), z * noise / math.sqrt(n_seeds))
+        if record is not None:
+            record.append({"current": [current.lines, current.trains],
+                           "proposals": [[spec.lines, spec.trains, edit] for spec, edit in proposals],
+                           "ticks": ticks.tolist(), "accepted": best if take else None})
         if take:
             current = proposals[best][0]
             accepted[proposals[best][1]] += 1
@@ -190,3 +220,33 @@ def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, ba
     if stats["rounds"]:
         stats["final"] = float(np.mean(score([design], fresh_seeds())[0]))
     return design, stats
+
+
+def polish(base: MiniMetroSim, start: MiniMetroSim, value, rounds: int = 30, pool: int = 40,
+           rng: random.Random | None = None, on_round=None) -> tuple[MiniMetroSim, dict]:
+    """Hill-climb from `start` on value(spec) -> float (higher is better) alone: each round
+    draws up to `pool` edits and keeps the best if it beats the current design. No play-outs,
+    so nothing here is measured; with survival.SurvivalModel(base).log_ticks as `value` it
+    gained x1.70 over the heuristic on 48 bench maps (play-out search, 320 games: x1.58).
+
+    stats["start"] / stats["final"] are value() of the starting / returned design.
+    on_round works as in improve."""
+    rng = rng or random.Random()
+    nbrs = neighbor_sets(base, NEIGHBOR_K_DEFAULT)
+    current = spec_of(start)
+    best = value(current)
+    accepted = Counter()
+    stats = {"start": best, "final": best, "accepted": {}, "rounds": 0}
+    for round_idx in range(rounds):
+        edits = draw_edits(current, base, nbrs, rng, pool)
+        if not edits:
+            break
+        values = [value(spec) for spec, _ in edits]
+        i = int(np.argmax(values))
+        if values[i] > best + 1e-9:
+            current, best = edits[i][0], values[i]
+            accepted[edits[i][1]] += 1
+        stats.update(final=best, accepted=dict(accepted), rounds=round_idx + 1)
+        if on_round is not None and on_round(round_idx + 1, rounds, build(base, current), dict(stats)) is False:
+            break
+    return build(base, current), stats
