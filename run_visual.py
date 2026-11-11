@@ -4,6 +4,7 @@
     python run_visual.py --dev                   # step through decisions and their scores
     python run_visual.py --map 10003 --search 0  # one map, no play-out search
     python run_visual.py --heuristic --dev
+    python run_visual.py --level 30              # a bench difficulty level (maps.LEVELS)
 
 Press H in the window for the keys (also listed in visualizer.py). Maps given with --map
 play in order from that seed; otherwise they are random. The design search draws its seeds
@@ -16,13 +17,14 @@ import random
 
 import bench
 from agent import Agent
+from maps import LEVELS
 from simulator import MiniMetroSim
 from visualizer import NextMap, Visualizer
 
 
-def episode(agent: Agent, vis: Visualizer, map_seed: int, search_rounds: int, rng: random.Random):
+def episode(agent: Agent, vis: Visualizer, map_seed: int, level: str, search_rounds: int, rng: random.Random):
     """Design one map on screen, polish it with search, and play it until the viewer moves on."""
-    sim0 = MiniMetroSim(map_seed=map_seed)
+    sim0 = MiniMetroSim(map_seed, map_spec=LEVELS[level].spec(map_seed))
     design = agent.design(sim0, on_step=vis.show_design_step).sim
     if search_rounds > 0:
         vis.show_search(0, search_rounds, design, None)
@@ -40,14 +42,15 @@ def episode(agent: Agent, vis: Visualizer, map_seed: int, search_rounds: int, rn
             return
 
 
-def watch(agent: Agent, vis: Visualizer, maps, search_rounds: int = 0, policy: str = ""):
+def watch(agent: Agent, vis: Visualizer, maps, level: str = "classic", search_rounds: int = 0, policy: str = ""):
     """Show `maps` one after another (N skips ahead). Returns when they run out; ESC or
     closing the window raises SystemExit."""
     rng = random.Random()
     for map_seed in maps:
-        vis.new_map(map=map_seed, policy=policy)
+        spec = LEVELS[level].spec(map_seed)
+        vis.new_map(map=map_seed, stations=f"{spec.stations} {spec.layout}", policy=policy)
         try:
-            episode(agent, vis, map_seed, search_rounds, rng)
+            episode(agent, vis, map_seed, level, search_rounds, rng)
         except NextMap:
             pass
 
@@ -57,6 +60,7 @@ def main():
     parser.add_argument("--dev", action="store_true", help="development view (manual design steps, scores)")
     parser.add_argument("--map", type=int, help="first map seed (default: random maps)")
     parser.add_argument("--maps", type=int, default=500, help="how many maps to show")
+    parser.add_argument("--level", choices=list(LEVELS), default="classic", help="kind of map (maps.LEVELS)")
     parser.add_argument("--search", type=int, default=10, metavar="ROUNDS",
                         help="rounds of play-out search to polish each design (0 = off)")
     parser.add_argument("--ckpt", default="checkpoint_v4_best", help="checkpoint to load")
@@ -79,7 +83,7 @@ def main():
             else [rng.randrange(10_000) for _ in range(args.maps)])
     vis = Visualizer(mode="dev" if args.dev else "showcase")
     try:
-        watch(agent, vis, maps, args.search, policy)
+        watch(agent, vis, maps, args.level, args.search, policy)
     except SystemExit:
         pass
     finally:

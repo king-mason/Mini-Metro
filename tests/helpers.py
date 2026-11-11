@@ -12,7 +12,7 @@ from simulator import MiniMetroSim
 
 
 def fresh_map(map_seed: int) -> MiniMetroSim:
-    return MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
+    return MiniMetroSim(map_seed=map_seed)
 
 
 def random_action(sim: MiniMetroSim, rng: random.Random) -> tuple:

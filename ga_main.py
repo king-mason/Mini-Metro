@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ga import GeneticAlgorithm, apply_genome
+from maps import MapSpec
 from simulator import MiniMetroSim
 from visualizer import Visualizer
 
@@ -73,7 +74,7 @@ plt.show()
 
 # ---- final visualized run with best genome ----
 assert ga.best_genome is not None, "No best genome found — did training run?"
-sim = MiniMetroSim(ga.num_stations, map_seed=0)
+sim = MiniMetroSim(0, map_spec=MapSpec(ga.num_stations))
 apply_genome(sim, ga.best_genome)
 
 print("Running final visualized simulation with best genome...")

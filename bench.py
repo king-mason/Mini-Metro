@@ -5,9 +5,11 @@
     python bench.py agent --ckpt checkpoint_v4_best --mcts 30
     python bench.py heuristic --search 10 --maps 20    # then polished by play-out search
     python bench.py heuristic --polish 30              # then polished by the survival estimate
+    python bench.py heuristic --suite classic          # the original 20-station maps
 
-Every run plays the same held-out maps and passenger seeds. Results go to
-bench_results/<name>.json and are compared, map by map, with bench_results/heuristic.json.
+Every run plays the same held-out maps and passenger seeds: --maps N per difficulty level
+(maps.LEVELS). Results go to bench_results/<name>.json and are compared, map by map, with
+bench_results/heuristic.json (classic suite: bench_results/classic/).
 """
 
 import argparse
@@ -24,13 +26,39 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from config import HEIGHT, MAX_TRAINS, WIDTH
+from maps import LEVELS, MapSpec
 from playouts import CAP
 from point import Point
 from simulator import MiniMetroSim, run_playout
 
-BENCH_MAPS = list(range(10_000, 10_100))  # held out: training uses maps 0..9999
+BENCH_LEVELS = ("30", "35", "40")         # keys of maps.LEVELS, easiest first
+LEVEL_MAPS = 100                          # maps per level
+CLASSIC_MAPS = list(range(10_000, 10_100))
 BENCH_SEEDS = list(range(5))              # passenger seeds, shared by every run
 RESULTS_DIR = "bench_results"
+
+
+@dataclass(frozen=True)
+class BenchMap:
+    level: str      # a key of maps.LEVELS
+    seed: int
+
+    @property
+    def spec(self) -> MapSpec:
+        return LEVELS[self.level].spec(self.seed)
+
+    def sim(self):
+        return MiniMetroSim(self.seed, map_spec=self.spec)
+
+
+def suite(name: str = "levels", per_level: int | None = None) -> list[BenchMap]:
+    """The bench maps, held out (training uses seeds 0..9999). "levels": the first
+    `per_level` maps of each level, each level its own block of seeds. "classic": the
+    original 20-station maps."""
+    if name == "classic":
+        return [BenchMap("classic", m) for m in CLASSIC_MAPS[:per_level]]
+    return [BenchMap(level, 10_000 + 1_000 * j + i)
+            for j, level in enumerate(BENCH_LEVELS) for i in range(per_level or LEVEL_MAPS)]
 
 
 @dataclass
@@ -61,9 +89,10 @@ def search_seed_rng(map_seed: int) -> random.Random:
     return random.Random(1_000_000 + map_seed)
 
 
-def evaluate_map(agent, spec: PolicySpec, map_seed: int, seeds: list[int], cap: int) -> dict:
+def evaluate_map(agent, spec: PolicySpec, bench_map: BenchMap, seeds: list[int], cap: int) -> dict:
     """Design one map (then polish / search, as `spec` says) and play it once per seed."""
-    sim0 = MiniMetroSim(map_seed=map_seed)
+    map_seed = bench_map.seed
+    sim0 = bench_map.sim()
     result = agent.design(sim0)
     design, polish, search = result.sim, None, None
     if spec.polish_rounds:
@@ -73,6 +102,8 @@ def evaluate_map(agent, spec: PolicySpec, map_seed: int, seeds: list[int], cap: 
                                        rng=random.Random(map_seed))
     runs = [run_playout(design, seed, cap) for seed in seeds]
     return {
+        "level": bench_map.level,
+        "layout": bench_map.spec.layout,
         "map": map_seed,
         "ticks": [t for t, _ in runs],
         "delivered": [d for _, d in runs],
@@ -94,8 +125,8 @@ def _init_worker(spec: PolicySpec):
     _worker_agent = make_agent(spec)
 
 
-def _eval_map_in_worker(spec: PolicySpec, map_seed: int, seeds: list[int], cap: int) -> dict:
-    return evaluate_map(_worker_agent, spec, map_seed, seeds, cap)
+def _eval_map_in_worker(spec: PolicySpec, bench_map: BenchMap, seeds: list[int], cap: int) -> dict:
+    return evaluate_map(_worker_agent, spec, bench_map, seeds, cap)
 
 
 def _pool(spec: PolicySpec, workers: int) -> ProcessPoolExecutor:
@@ -112,14 +143,14 @@ def mirrored(sim: MiniMetroSim, flip_x: bool = True, flip_y: bool = False) -> Mi
     return m
 
 
-def _mirror_check_in_worker(map_seed: int) -> tuple[bool, bool]:
-    sim = MiniMetroSim(map_seed=map_seed)
+def _mirror_check_in_worker(bench_map: BenchMap) -> tuple[bool, bool]:
+    sim = bench_map.sim()
     base = _worker_agent.design(sim).actions
     return (_worker_agent.design(mirrored(sim, True, False)).actions == base,
             _worker_agent.design(mirrored(sim, False, True)).actions == base)
 
 
-def invariance(spec: PolicySpec, maps=BENCH_MAPS, workers: int | None = None) -> dict:
+def invariance(spec: PolicySpec, maps: list[BenchMap], workers: int | None = None) -> dict:
     """Share of maps whose design is unchanged by left-right / top-bottom mirroring."""
     with _pool(spec, max(workers or default_workers(), 1)) as pool:
         checks = list(pool.map(_mirror_check_in_worker, list(maps)))
@@ -130,9 +161,11 @@ def invariance(spec: PolicySpec, maps=BENCH_MAPS, workers: int | None = None) ->
     }
 
 
-def run(spec: PolicySpec, maps=BENCH_MAPS, seeds=BENCH_SEEDS, cap: int = CAP, workers: int | None = None) -> dict:
-    """Evaluate `spec` on every map. workers=0 runs in this process (for debugging)."""
-    maps, seeds = list(maps), list(seeds)
+def run(spec: PolicySpec, maps: list[BenchMap] | None = None, seeds=BENCH_SEEDS, cap: int = CAP,
+        workers: int | None = None) -> dict:
+    """Evaluate `spec` on every map (default: the levels suite). workers=0 runs in this
+    process (for debugging)."""
+    maps, seeds = list(maps or suite()), list(seeds)
     workers = default_workers() if workers is None else workers
     if workers == 0:
         agent = make_agent(spec)
@@ -144,14 +177,20 @@ def run(spec: PolicySpec, maps=BENCH_MAPS, seeds=BENCH_SEEDS, cap: int = CAP, wo
     return {"spec": asdict(spec), "cap": cap, "seeds": seeds, "maps": rows}
 
 
-def map_scores(results: dict) -> dict[int, float]:
-    """Per-map score: mean ticks survived over the passenger seeds (each capped)."""
-    return {row["map"]: float(np.mean(row["ticks"])) for row in results["maps"]}
+def map_key(row: dict) -> tuple[str, int]:
+    """Runs pair up by level and map seed (results from before levels are classic)."""
+    return row.get("level", "classic"), row["map"]
 
 
-def summarize(results: dict) -> dict:
-    rows = results["maps"]
-    scores = np.array(list(map_scores(results).values()))
+def map_scores(results: dict, where=None) -> dict[tuple[str, int], float]:
+    """Per-map score: mean ticks survived over the passenger seeds (each capped). where(row)
+    picks a subset of maps."""
+    return {map_key(r): float(np.mean(r["ticks"])) for r in results["maps"] if where is None or where(r)}
+
+
+def summarize(results: dict, where=None) -> dict:
+    rows = [r for r in results["maps"] if where is None or where(r)]
+    scores = np.array(list(map_scores(results, where).values()))
     return {
         "maps": len(rows),
         "mean": float(scores.mean()),
@@ -166,12 +205,13 @@ def summarize(results: dict) -> dict:
     }
 
 
-def compare(results: dict, reference: dict) -> dict:
+def compare(results: dict, reference: dict, where=None) -> dict:
     """Geometric-mean survival ratio vs `reference`, paired by map, with a 95% CI. A map is
-    a win / loss when its ratio is more than 1% from 1. The runs must share seeds and cap."""
+    a win / loss when its ratio is more than 1% from 1. The runs must share seeds and cap;
+    where(row) compares a subset of maps."""
     if results["seeds"] != reference["seeds"] or results["cap"] != reference["cap"]:
         raise ValueError("results and reference used different passenger seeds or caps")
-    a, b = map_scores(results), map_scores(reference)
+    a, b = map_scores(results, where), map_scores(reference)
     common = sorted(set(a) & set(b))
     d = np.log([a[m] / b[m] for m in common])
     half = 1.96 * d.std(ddof=1) / math.sqrt(len(d)) if len(d) > 1 else float("nan")
@@ -185,9 +225,13 @@ def compare(results: dict, reference: dict) -> dict:
     }
 
 
-def save(results: dict, name: str) -> str:
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    path = os.path.join(RESULTS_DIR, f"{name}.json")
+def results_dir(suite_name: str) -> str:
+    return RESULTS_DIR if suite_name == "levels" else os.path.join(RESULTS_DIR, suite_name)
+
+
+def save(results: dict, name: str, directory: str = RESULTS_DIR) -> str:
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{name}.json")
     with open(path, "w") as f:
         json.dump(results, f)
     return path
@@ -212,6 +256,20 @@ def report(name: str, results: dict, reference: dict | None = None, reference_na
         lines.append(
             f"  vs {reference_name}: x{c['ratio']:.3f} geometric mean [95% CI {c['lo']:.3f}, {c['hi']:.3f}]"
             f"   better on {c['wins']:.0%}, worse on {c['losses']:.0%} of {c['n']} maps")
+    for field in ("level", "layout"):
+        values = sorted({r[field] for r in results["maps"] if field in r}, key=lambda v: (len(v), v))
+        if len(values) < 2:
+            continue
+        lines.append(f"  by {field:7s} maps   mean  reached cap" + (f"   vs {reference_name}" if reference else ""))
+        for value in values:
+            def where(r):
+                return r.get(field) == value
+            g = summarize(results, where)
+            row = f"    {value:10s} {g['maps']:4d} {g['mean']:6.0f}  {g['reached_cap']:9.0%}"
+            if reference is not None:
+                c = compare(results, reference, where)
+                row += f"     x{c['ratio']:.3f} [{c['lo']:.3f}, {c['hi']:.3f}]" if c["n"] else "     (not in reference)"
+            lines.append(row)
     return "\n".join(lines)
 
 
@@ -232,10 +290,11 @@ def main():
     parser.add_argument("--ckpt", default="checkpoint_v4_best", help="checkpoint dir for policy=agent")
     parser.add_argument("--mcts", type=int, default=0, help="MCTS simulations per decision (0 = greedy)")
     parser.add_argument("--name", help="results name (default: derived from the policy)")
-    parser.add_argument("--maps", type=int, default=len(BENCH_MAPS), help="use the first N bench maps")
+    parser.add_argument("--suite", choices=["levels", "classic"], default="levels")
+    parser.add_argument("--maps", type=int, help="use the first N maps of each level")
     parser.add_argument("--workers", type=int, default=default_workers())
-    parser.add_argument("--compare", default=os.path.join(RESULTS_DIR, "heuristic.json"),
-                        help="results file to compare against, paired by map")
+    parser.add_argument("--compare", help="results file to compare against, paired by map "
+                                          "(default: the suite's heuristic.json)")
     parser.add_argument("--invariance", action="store_true",
                         help="also check whether mirrored maps get the same design")
     parser.add_argument("--polish", type=int, default=0, metavar="ROUNDS",
@@ -249,15 +308,18 @@ def main():
     spec = PolicySpec(args.policy, args.ckpt if args.policy == "agent" else None, args.mcts,
                       polish_rounds=args.polish, search_rounds=args.search, screen_edits=not args.plain_search)
     name = args.name or default_name(spec)
+    maps = suite(args.suite, args.maps)
+    directory = results_dir(args.suite)
+    compare_path = args.compare or os.path.join(directory, "heuristic.json")
     start = time.time()
-    results = run(spec, maps=BENCH_MAPS[:args.maps], workers=args.workers)
-    path = save(results, name)
+    results = run(spec, maps=maps, workers=args.workers)
+    path = save(results, name, directory)
     reference = None
-    if os.path.exists(args.compare) and os.path.abspath(args.compare) != os.path.abspath(path):
-        reference = load(args.compare)
-    print(report(name, results, reference, os.path.splitext(os.path.basename(args.compare))[0]))
+    if os.path.exists(compare_path) and os.path.abspath(compare_path) != os.path.abspath(path):
+        reference = load(compare_path)
+    print(report(name, results, reference, os.path.splitext(os.path.basename(compare_path))[0]))
     if args.invariance:
-        inv = invariance(spec, maps=BENCH_MAPS[:args.maps], workers=args.workers)
+        inv = invariance(spec, maps=maps, workers=args.workers)
         print(f"  same design on mirrored map: left-right {inv['left_right']:.0%}, "
               f"top-bottom {inv['top_bottom']:.0%}, both {inv['both']:.0%}")
     print(f"  saved {path} ({time.time() - start:.0f}s)")

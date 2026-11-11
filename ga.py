@@ -18,6 +18,7 @@ import numpy as np
 from config import MAX_DIST, MAX_TRAINS, MAX_TRAINS_PER_LINE
 from config import MAX_LINES as max_lines
 from heuristic import structural_reward
+from maps import MapSpec
 from rules import ActionType, apply_action, is_legal
 from simulator import MiniMetroSim, run_playout
 
@@ -217,7 +218,7 @@ def evaluate(
     structural_weight: float = 1.0,
 ) -> float:
     """Combined fitness: mean ticks survived + structural_weight * structural reward."""
-    template = MiniMetroSim(num_stations, map_seed=map_seed)
+    template = MiniMetroSim(map_seed, map_spec=MapSpec(num_stations))
 
     s_reward = compute_structural_reward(template, genome)
 
@@ -407,7 +408,7 @@ class GeneticAlgorithm:
         """Return the neighbor graph for map_seed, rebuilding if the seed changed."""
         if map_seed == self._cached_seed and self._neighbors is not None:
             return self._neighbors
-        ref = MiniMetroSim(self.num_stations, map_seed=map_seed)
+        ref = MiniMetroSim(map_seed, map_spec=MapSpec(self.num_stations))
         self._neighbors = build_neighbor_graph(
             ref.stations, self.min_neighbors, self.max_dist_fraction
         )

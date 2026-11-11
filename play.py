@@ -1,6 +1,6 @@
 """Interactive build-your-own-network mode.
 
-Run: python play.py [--map SEED]
+Run: python play.py [--map SEED] [--level LEVEL]
 
 Build phase:
   Left-click a station    : start a NEW line, or EXTEND the selected line from its nearer end
@@ -25,6 +25,7 @@ import random
 import pygame
 
 from config import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE
+from maps import LEVELS
 from metrics import station_load_factors
 from rules import ActionType, apply_action, crosses_network, is_legal
 from simulator import MiniMetroSim
@@ -239,13 +240,15 @@ def build_phase(sim: MiniMetroSim, vis: Visualizer) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="Build a network by hand and play it.")
     parser.add_argument("--map", type=int, default=1, help="map seed")
+    parser.add_argument("--level", choices=list(LEVELS), default="classic", help="kind of map (maps.LEVELS)")
     args = parser.parse_args()
 
     vis = Visualizer(mode="dev", caption="Mini Metro - Build Your Own")
     vis.auto_next = None
     vis.next_label = "edit the design"
-    vis.new_map(map=args.map, policy="you")
-    sim = MiniMetroSim(map_seed=args.map)
+    spec = LEVELS[args.level].spec(args.map)
+    vis.new_map(map=args.map, stations=f"{spec.stations} {spec.layout}", policy="you")
+    sim = MiniMetroSim(args.map, map_spec=spec)
     rng = random.Random()
     try:
         while build_phase(sim, vis):

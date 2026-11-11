@@ -146,14 +146,12 @@ def neighbor_sets(sim: MiniMetroSim, k: int = NEIGHBOR_K) -> list[set[int]]:
     if cache is not None and cache[0] == k:
         return cache[1]
     n = len(sim.stations)
-    nearest = [set(sorted((j for j in range(n) if j != i),
-                          key=lambda j: sim.stations[i].pos.get_distance(sim.stations[j].pos))[:k]) for i in range(n)]
-    # Built set from set on purpose: the iteration order breaks distance ties between
-    # candidates, and this reproduces the benchmarked designs. (Tie-break explicitly at
-    # the next re-baseline.)
-    sym = [set(near) for near in nearest]
+    sym: list[set[int]] = [set() for _ in range(n)]
     for i in range(n):
-        for j in nearest[i]:
+        here = sim.stations[i].pos
+        nearest = sorted((j for j in range(n) if j != i), key=lambda j: (here.get_distance(sim.stations[j].pos), j))
+        for j in nearest[:k]:
+            sym[i].add(j)
             sym[j].add(i)
     sim._neighbor_cache = (k, sym)
     return sym

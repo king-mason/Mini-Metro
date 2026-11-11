@@ -20,6 +20,7 @@ import torch.optim as optim
 from torch_geometric.data import Batch
 
 from agent import Agent, DesignResult
+from maps import LEVELS
 from model import IDENTITY_AUG, action_aux_features, action_station_indices, build_graph
 from simulator import MiniMetroSim
 
@@ -37,6 +38,7 @@ class TrainConfig:
     branch_temperature: float = 0.25
     replays_per_episode: int = 4
     augment: bool = True             # encode each training map under a random symmetry
+    level: str = "classic"           # kind of training map (maps.LEVELS)
 
 
 class _NoAlternative(Exception):
@@ -70,7 +72,7 @@ class Trainer:
         """Each round scores the incumbent and up to num_branches single-decision edits on the
         same fresh seeds; the best edit replaces the incumbent if it wins by accept_margin."""
         cfg = self.config
-        sim0 = MiniMetroSim(map_seed=map_seed)
+        sim0 = MiniMetroSim(map_seed, map_spec=LEVELS[cfg.level].spec(map_seed))
         incumbent = self.agent.design(sim0)
         samples, ticks_greedy, ticks_best, accepted = [], None, 0.0, 0
         for _ in range(cfg.branch_rounds):

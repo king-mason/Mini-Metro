@@ -20,7 +20,7 @@ ROLLING_WINDOW = 50
 EVAL_EVERY = 25
 CKPT = "checkpoint_v4"
 BEST_CKPT = "checkpoint_v4_best"
-VAL_MAPS = list(range(20_000, 20_040))
+VAL_MAPS = [bench.BenchMap("classic", m) for m in range(20_000, 20_040)]
 VAL_SEEDS = list(range(3))
 WORKERS = bench.default_workers()
 

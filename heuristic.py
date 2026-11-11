@@ -72,7 +72,7 @@ def get_candidate_actions(sim: MiniMetroSim, k: int = K_CANDIDATES, phase: str =
                 if id(sim.stations[new]) not in on_line and not crosses_network(sim, tip, new, segments):
                     d = line.stations[end].pos.get_distance(sim.stations[new].pos)
                     extensions.append((d, (ActionType.EXTEND_LINE, li, end, new)))
-    extensions.sort(key=lambda row: row[0])
+    extensions.sort(key=lambda row: (row[0], row[1][1:]))     # ties: lowest line, end, station
     for _, action in extensions[:k]:
         offer(action)
     offer_shortest(extensions, lambda row, i: row[1][3] == i)
@@ -88,7 +88,7 @@ def get_candidate_actions(sim: MiniMetroSim, k: int = K_CANDIDATES, phase: str =
                         and not crosses_network(sim, a, b, segments)):
                     d = sim.stations[a].pos.get_distance(sim.stations[b].pos)
                     new_lines.append((d, (ActionType.NEW_LINE, a, b)))
-        new_lines.sort(key=lambda row: row[0])
+        new_lines.sort(key=lambda row: (row[0], row[1][1:]))
         for _, action in new_lines[:k]:
             offer(action)
         offer_shortest(new_lines, lambda row, i: i in row[1][1:])

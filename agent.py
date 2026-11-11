@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
-from config import MAX_TRAINS
+from config import MAX_LINES, MAX_TRAINS
 from heuristic import K_CANDIDATES, PRIOR, get_candidate_actions, structural_reward
 from mcts import MCTS
 from metrics import NEIGHBOR_K
@@ -41,7 +41,7 @@ class Agent:
     the structural heuristic; use_q=False always does."""
 
     def __init__(self, use_q: bool = True, k_candidates: int = K_CANDIDATES, k_neighbors: int = NEIGHBOR_K,
-                 max_design_actions: int = 50, prior_scale: float = PRIOR.prior_scale,
+                 max_design_actions: int | None = None, prior_scale: float = PRIOR.prior_scale,
                  override_margin: float = 0.1, playout_seeds: int = 4, playout_cap: int = CAP,
                  workers: int = 0, mcts_sims: int = 0, mcts_c: float = 1.4, mcts_horizon: int = 6,
                  screen_edits: bool = True, seed: int | None = None):
@@ -179,7 +179,8 @@ class Agent:
                     return
                 apply_action(sim, action)
 
-        build("lines", self.max_design_actions)
+        # no line visits a station twice, so MAX_LINES * stations decisions always suffice
+        build("lines", self.max_design_actions or MAX_LINES * len(sim.stations))
         n_forced, n_stranded = connect_isolated(sim, show)
         build("trains", MAX_TRAINS + 1)
         return DesignResult(sim, actions, phases, n_candidates, n_forced, n_stranded)

@@ -13,7 +13,7 @@ map_seeds = st.integers(min_value=0, max_value=10 ** 6)
 
 @given(map_seeds)
 def test_maps_are_reproducible_and_well_formed(map_seed):
-    a, b = MiniMetroSim(NUM_STATIONS, map_seed=map_seed), MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
+    a, b = MiniMetroSim(map_seed=map_seed), MiniMetroSim(map_seed=map_seed)
     assert [(s.x, s.y, s.type) for s in a.stations] == [(s.x, s.y, s.type) for s in b.stations]
     assert len(a.stations) == NUM_STATIONS
     assert len({(s.x, s.y) for s in a.stations}) == NUM_STATIONS      # distinct grid points
@@ -22,7 +22,7 @@ def test_maps_are_reproducible_and_well_formed(map_seed):
 
 @given(map_seeds, st.integers(min_value=0, max_value=NUM_STATIONS - 1))
 def test_target_probabilities(map_seed, i):
-    sim = MiniMetroSim(NUM_STATIONS, map_seed=map_seed)
+    sim = MiniMetroSim(map_seed=map_seed)
     probs = sim.target_type_probs(i)
     assert abs(sum(probs.values()) - 1) < 1e-9
     assert probs[sim.stations[i].type] == 0
@@ -49,7 +49,7 @@ def test_passenger_seed_is_independent_of_global_random():
 
 def test_failure_rule():
     """The game ends once the overcrowded station-ticks, summed over the game, pass the limit."""
-    sim = MiniMetroSim(NUM_STATIONS, map_seed=7, passenger_seed=0)   # no lines: everyone waits
+    sim = MiniMetroSim(map_seed=7, passenger_seed=0)   # no lines: everyone waits
     last = 0
     while not sim.failed:
         sim.step()

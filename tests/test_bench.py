@@ -44,4 +44,4 @@ def test_unpaired_runs_are_refused():
 
 def test_map_score_is_the_mean_over_seeds():
     r = {"seeds": [0, 1], "cap": 10, "maps": [{"map": 5, "ticks": [2, 4]}]}
-    assert map_scores(r) == {5: 3.0}
+    assert map_scores(r) == {("classic", 5): 3.0}

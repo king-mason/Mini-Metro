@@ -7,10 +7,9 @@ import math
 import random
 from collections import Counter
 
-from config import (HEIGHT, MAX_LINES, MAX_OVERCROWD_TICKS, NUM_STATIONS, PASSENGERS, STATION_CAPACITY, STATION_RADIUS,
-                    TIME_SCALE, WIDTH)
-from objects import Line, Passenger, Station, StationType, Train
-from point import Point
+from config import MAX_LINES, MAX_OVERCROWD_TICKS, PASSENGERS, STATION_CAPACITY, TIME_SCALE
+from maps import MapSpec, generate
+from objects import Line, Passenger, StationType, Train
 
 _CHANCE_START = PASSENGERS["spawn_chance_init"]
 _CHANCE_MAX = PASSENGERS["spawn_chance_max"]
@@ -18,11 +17,6 @@ _CHANCE_GROWTH = max(1, PASSENGERS["spawn_chance_growth"] // TIME_SCALE)
 _INTERVAL_MAX = max(1, PASSENGERS["spawn_interval_max"] // TIME_SCALE)
 _INTERVAL_MIN = max(1, PASSENGERS["spawn_interval_min"] // TIME_SCALE)
 _INTERVAL_DECAY = PASSENGERS["spawn_decay"] * TIME_SCALE
-
-COMMON_TYPES = (StationType.CIRCLE, StationType.SQUARE, StationType.TRIANGLE)
-COMMON_WEIGHTS = (0.5, 0.35, 0.15)
-RARE_TYPES = (StationType.CROSS, StationType.DIAMOND, StationType.PENTAGON, StationType.RHOMBUS,
-              StationType.DROPLET, StationType.STAR, StationType.LEMON)
 
 
 def current_spawn_interval(t: int) -> float:
@@ -41,29 +35,13 @@ def current_spawn_chance(t: int) -> float:
     return _CHANCE_START + diff * (2 / (1 + math.exp(-2 * t / _CHANCE_GROWTH)) - 1)
 
 
-def random_stations(n: int, rng) -> list[Station]:
-    """n stations on distinct points of a grid (spacing 4 radii) over the middle of the
-    screen. Every 10th station gets a rare type, and there are always at least two types."""
-    spacing = 4 * STATION_RADIUS
-    free = [Point(x, y) for x in range(WIDTH // 10, 9 * WIDTH // 10 + 1, spacing)
-            for y in range(HEIGHT // 5, 4 * HEIGHT // 5 + 1, spacing)]
-    stations = []
-    for k in range(1, min(n, len(free)) + 1):
-        pos = rng.choice(free)
-        free.remove(pos)
-        stype = rng.choice(RARE_TYPES) if k % 10 == 0 else rng.choices(COMMON_TYPES, COMMON_WEIGHTS)[0]
-        stations.append(Station(stype, pos))
-    types = {s.type for s in stations}
-    if len(types) < 2 and len(stations) >= 2:
-        stations[-1].type = next(t for t in COMMON_TYPES if t not in types)
-    return stations
-
-
 class MiniMetroSim:
-    def __init__(self, num_stations: int = NUM_STATIONS, map_seed: int | None = None, passenger_seed: int | None = None):
-        """map_seed fixes the station layout, passenger_seed the spawning. Each sim owns its
-        RNGs, so other random draws (exploration, search) can't shift the passenger stream."""
-        self.stations = random_stations(num_stations, random.Random(map_seed) if map_seed is not None else random)
+    def __init__(self, map_seed: int | None = None, passenger_seed: int | None = None,
+                 map_spec: MapSpec = MapSpec()):
+        """map_seed fixes the stations (drawn as map_spec says), passenger_seed the spawning.
+        Each sim owns its RNGs, so other random draws (exploration, search) can't shift the
+        passenger stream."""
+        self.stations = generate(map_spec, random.Random(map_seed) if map_seed is not None else random)
         self.rng = random.Random(passenger_seed)
         self.lines: list[Line] = []
         self.time = 0
