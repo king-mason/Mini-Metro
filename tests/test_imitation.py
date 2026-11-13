@@ -4,10 +4,10 @@ import random
 
 from hypothesis import given, settings, strategies as st
 
-from agent import Agent
-from imitation import Imitator, right_moves, walk
-from rules import ActionType, apply_action
-from search import spec_of
+from minimetro.design.agent import Agent
+from minimetro.design.search import spec_of
+from minimetro.game.rules import ActionType, apply_action
+from minimetro.learning.imitation import Imitator, right_moves, walk
 from tests.helpers import fresh_map, heuristic_design
 
 

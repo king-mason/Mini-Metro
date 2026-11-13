@@ -6,9 +6,9 @@ import random
 import pytest
 from hypothesis import given, strategies as st
 
-from agent import Agent
-from bench import mirrored
-from rules import connect_isolated, is_legal
+from minimetro.bench import mirrored
+from minimetro.design.agent import Agent
+from minimetro.game.rules import connect_isolated, is_legal
 from tests.helpers import crossing_pairs, fresh_map, heuristic_agent, heuristic_design
 
 pytestmark = pytest.mark.slow
@@ -94,7 +94,7 @@ def test_checkpoint_round_trip(tmp_path, untrained):
 @pytest.mark.parametrize("map_seed", [10_007, 10_008])
 def test_polish_restarts_keep_the_best_rated_climb(map_seed):
     """The first climb is plain polish; more climbs can only raise the estimate kept."""
-    from search import spec_of, valid
+    from minimetro.design.search import spec_of, valid
     agent, sim0 = heuristic_agent(), fresh_map(map_seed)
     design = agent.design(sim0).sim
     one, one_stats = agent.polish(sim0, design, rounds=5, rng=random.Random(0))
@@ -106,7 +106,7 @@ def test_polish_restarts_keep_the_best_rated_climb(map_seed):
 
 
 def test_noisy_design_differs_but_serves_every_station():
-    from search import spec_of
+    from minimetro.design.search import spec_of
     agent, sim0 = heuristic_agent(), fresh_map(10_009)
     noisy = agent.noisy_design(sim0, random.Random(1))
     assert {id(s) for l in noisy.lines for s in l.stations} == {id(s) for s in noisy.stations}

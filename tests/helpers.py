@@ -6,9 +6,9 @@ from functools import lru_cache
 
 import numpy as np
 
-from config import MAX_LINES, NUM_STATIONS
-from rules import ActionType, apply_action, is_legal, line_segments, segments_cross
-from simulator import MiniMetroSim
+from minimetro.config import MAX_LINES, NUM_STATIONS
+from minimetro.game.rules import ActionType, apply_action, is_legal, line_segments, segments_cross
+from minimetro.game.simulator import MiniMetroSim
 
 
 def fresh_map(map_seed: int) -> MiniMetroSim:
@@ -42,7 +42,7 @@ def random_legal_design(map_seed: int, seed: int, attempts: int = 200) -> MiniMe
 @lru_cache(maxsize=None)
 def heuristic_agent():
     """The structural heuristic (Q off), shared by all tests. Imports torch on first use."""
-    from agent import Agent
+    from minimetro.design.agent import Agent
     return Agent(use_q=False)
 
 

@@ -1,6 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minimetro"
+version = "0.1.0"
+description = "A Mini Metro-style network design game and an AI that designs networks for it"
+requires-python = ">=3.10"
+dependencies = ["pygame", "numpy", "pyyaml", "matplotlib", "torch", "torch_geometric"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+minimetro = ["config.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 addopts = "-q"
 markers = [
     "slow: plays many full games or loads torch models (deselect with -m 'not slow')",

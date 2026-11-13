@@ -9,9 +9,9 @@ import os
 
 import pytest
 
-from rules import ActionType
-from search import spec_of
-from simulator import run_playout
+from minimetro.design.search import spec_of
+from minimetro.game.rules import ActionType
+from minimetro.game.simulator import run_playout
 from tests.helpers import heuristic_design
 
 GOLDEN = os.path.join(os.path.dirname(__file__), "data", "golden.json")

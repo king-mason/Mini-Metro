@@ -5,10 +5,10 @@ import random
 import pytest
 from hypothesis import given, strategies as st
 
-from point import Point
-from config import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE
-from rules import (ActionType, action_segments, apply_action, apply_add_train, can_add_train, crosses_network,
-                   is_legal, line_segments, segments_cross)
+from minimetro.config import MAX_LINES, MAX_TRAINS, MAX_TRAINS_PER_LINE
+from minimetro.game.point import Point
+from minimetro.game.rules import (ActionType, action_segments, apply_action, apply_add_train, can_add_train, crosses_network,
+                                  is_legal, line_segments, segments_cross)
 from tests.helpers import crossing_pairs, fresh_map, random_action, random_legal_design
 
 coord = st.integers(min_value=-50, max_value=50)

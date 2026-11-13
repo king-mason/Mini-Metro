@@ -1,0 +1,52 @@
+# Game settings (loaded by config.py). Times are in ticks at time_scale 1.
+
+resolution: [1512, 885]
+time_scale: 3  # multiplier: trains faster, spawning more frequent
+
+paths:                       # relative to where scripts run (the repository root)
+  screenshots: "screenshots/"
+  results: "results"
+  checkpoints: "checkpoints"
+  data: "data"
+  default_checkpoint: "checkpoints/v4_best"
+
+stations:
+  count: 20                  # stations per map
+  radius: 15
+  capacity: 12               # waiting passengers before a station is overcrowded
+  max_overcrowd_ticks: 100   # game over once this many station-ticks are overcrowded
+
+passengers:
+  spawn_chance_init: 0.2     # chance a station spawns a passenger per spawn round, at the start
+  spawn_chance_max: 0.95
+  spawn_chance_growth: 1000  # ticks for the chance to grow most of the way (~76%) to max
+  spawn_interval_max: 200    # ticks between spawn rounds, at the start
+  spawn_interval_min: 30     # floor: the hardest steady state
+  spawn_decay: 0.01          # how fast the interval shrinks
+
+trains:
+  speed: 10.0                # pixels per tick
+  capacity: 6                # passengers per train
+  max_per_line: 4
+  total: 10                  # train pool shared by all lines
+
+lines:
+  max: 4
+
+# Structural prior (heuristic.py): hand-written scores that bias which designs get built.
+# The learned policy corrects them in units of log(ticks survived).
+rewards:
+  prior_scale: 0.01                 # structural reward -> log-ticks units
+
+  # congestion (analytic load factor, computed at design time)
+  congestion_penalty: 30.0          # EXTEND / NEW_LINE leaving a station's load factor above 1
+  congestion_relief: 30.0           # ADD_TRAIN lowering a line's worst load factor
+
+  # shaping
+  isolation_bonus: 1.0              # connecting a station that was on no line
+  reach_demand: 5.0                 # demand newly able to reach its destination
+  reach_coverage: 50.0              # station types newly reachable
+  scarcity_bonus: 1.0               # connecting a station with few close neighbors
+  bend_penalty: 1000.0              # bend at the junction: 0 straight -> 1 U-turn
+  connection_cost_scale: 4.0        # segment length cost: scale * (d + curvature * d^2)
+  connection_cost_curvature: 100.0

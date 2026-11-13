@@ -10,8 +10,8 @@ from collections import Counter, defaultdict
 import numpy as np
 from hypothesis import given, strategies as st
 
-from search import spec_of
-from survival import CAP_TICKS, SPAWN_RATE, SurvivalModel, target_probs
+from minimetro.design.search import spec_of
+from minimetro.design.survival import CAP_TICKS, SPAWN_RATE, SurvivalModel, target_probs
 from tests.helpers import fresh_map, heuristic_design, random_legal_design
 
 map_seeds = st.integers(min_value=0, max_value=10 ** 6)

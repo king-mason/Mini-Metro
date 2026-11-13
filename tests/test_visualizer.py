@@ -1,4 +1,4 @@
-"""visualizer.py: off-screen frames and the controls (SDL dummy driver, see conftest)."""
+"""viewer.py: off-screen frames and the controls (SDL dummy driver, see conftest)."""
 
 import copy
 
@@ -6,7 +6,7 @@ import pygame
 import pytest
 
 from tests.helpers import fresh_map, heuristic_agent, heuristic_design
-from visualizer import SPEEDS, NextMap, Visualizer
+from minimetro.viewer import SPEEDS, NextMap, Visualizer
 
 
 def press(key):

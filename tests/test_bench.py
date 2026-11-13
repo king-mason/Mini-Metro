@@ -5,7 +5,7 @@ import math
 import pytest
 from hypothesis import given, strategies as st
 
-from bench import PolicySpec, compare, default_name, map_scores, share_of_gain
+from minimetro.bench import PolicySpec, compare, default_name, map_scores, share_of_gain
 
 
 def results(scores: dict, seeds=(0, 1), cap=6000):

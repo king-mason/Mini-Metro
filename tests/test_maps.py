@@ -5,9 +5,9 @@ import random
 import pytest
 from hypothesis import given, strategies as st
 
-from bench import suite
-from maps import LAYOUTS, LEVELS, TRAIN_LAYOUTS, TRAIN_SIZES, MapSpec, generate, grid_points, novelty
-from simulator import MiniMetroSim
+from minimetro.bench import suite
+from minimetro.game.maps import LAYOUTS, LEVELS, TRAIN_LAYOUTS, TRAIN_SIZES, MapSpec, generate, grid_points, novelty
+from minimetro.game.simulator import MiniMetroSim
 
 specs = st.builds(MapSpec, st.integers(2, 40), st.sampled_from(list(LAYOUTS)), st.integers(1, 12))
 

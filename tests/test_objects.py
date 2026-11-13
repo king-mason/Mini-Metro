@@ -2,8 +2,8 @@
 
 from hypothesis import given, strategies as st
 
-from objects import Train
-from rules import ActionType, apply_action, can_add_train, is_legal
+from minimetro.game.objects import Train
+from minimetro.game.rules import ActionType, apply_action, can_add_train, is_legal
 from tests.helpers import headway_gaps, random_legal_design
 
 seeds = st.integers(min_value=0, max_value=10 ** 6)

@@ -4,8 +4,8 @@ import copy
 
 from hypothesis import given, strategies as st
 
-from config import MAX_OVERCROWD_TICKS, STATION_CAPACITY
-from simulator import MiniMetroSim, run_playout
+from minimetro.config import MAX_OVERCROWD_TICKS, STATION_CAPACITY
+from minimetro.game.simulator import MiniMetroSim, run_playout
 from tests.helpers import NUM_STATIONS, heuristic_design
 
 map_seeds = st.integers(min_value=0, max_value=10 ** 6)

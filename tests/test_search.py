@@ -10,10 +10,10 @@ import random
 import numpy as np
 from hypothesis import given, strategies as st
 
-from bench import BENCH_SEEDS
-from metrics import neighbor_sets
-from search import Spec, build, improve, kick, polish, propose, spec_of, valid
-from simulator import run_playout
+from minimetro.bench import BENCH_SEEDS
+from minimetro.design.metrics import neighbor_sets
+from minimetro.design.search import Spec, build, improve, kick, polish, propose, spec_of, valid
+from minimetro.game.simulator import run_playout
 from tests.helpers import crossing_pairs, fresh_map, heuristic_design
 
 map_indices = st.integers(min_value=0, max_value=99)
@@ -60,7 +60,7 @@ def test_valid_rejects_broken_specs():
     too_many.trains[0] += 5
     assert not valid(too_many, base)
     pos = [s.pos for s in base.stations]
-    from rules import segments_cross
+    from minimetro.game.rules import segments_cross
     crossing = next(((a, b, c, d) for a in range(20) for b in range(20) for c in range(20) for d in range(20)
                      if len({a, b, c, d}) == 4 and segments_cross(pos[a], pos[b], pos[c], pos[d])))
     a, b, c, d = crossing

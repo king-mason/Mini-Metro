@@ -1,7 +1,7 @@
 """Does the start matter? Polish each map from several starting designs and play the results.
 
-    PYTHONPATH=. python experiments/restart_test.py            # resumable; writes experiments/restart_test.jsonl
-    PYTHONPATH=. python experiments/restart_test.py --report   # summary only
+    python experiments/restart_test.py            # resumable; writes experiments/restart_test.jsonl
+    python experiments/restart_test.py --report   # summary only
 
 Arms per map (all polished until 15 rounds pass without a gain, unless noted):
     ref30   heuristic start, polish 30 rounds (the current teacher)
@@ -22,13 +22,13 @@ import multiprocessing
 
 import numpy as np
 
-import bench
-from agent import Agent
-from maps import LEVELS
-from metrics import neighbor_sets
-from search import build, polish, propose, spec_of
-from simulator import run_playout
-from survival import SurvivalModel
+from minimetro import bench
+from minimetro.design.agent import Agent
+from minimetro.design.metrics import neighbor_sets
+from minimetro.design.search import build, polish, propose, spec_of
+from minimetro.design.survival import SurvivalModel
+from minimetro.game.maps import LEVELS
+from minimetro.game.simulator import run_playout
 
 OUT = os.path.join("experiments", "restart_test.jsonl")
 SEEDS = list(range(5))

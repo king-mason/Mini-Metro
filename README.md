@@ -21,7 +21,7 @@ and the game ends when stations overcrowd. The goal is a network that lasts as l
 - The game ends when stations stay overcrowded (more than 12 waiting) for too long
 - The whole network is built before the first passenger arrives, then locked
 
-Settings are in [config.yaml](config.yaml).
+Settings are in [config.yaml](src/minimetro/config.yaml).
 
 ## Design Overview
 
@@ -44,11 +44,11 @@ flowchart TB
 
 | Part | What it is | File |
 |---|---|---|
-| **Agent** | Builds a network move by move (extend a line, start one, add a train), always taking the best-scored move | [agent.py](agent.py) |
-| **Heuristic** | Hand-written move score, a weighted sum of terms like segment length, bends, reach and crowding | [heuristic.py](heuristic.py) |
-| **Survival estimate** | Queueing model that predicts how long a network lasts, in 4 ms, without playing it | [survival.py](survival.py) |
-| **Hill climb** | Tries small edits, keeps the best, and repeats | [search.py](search.py) |
-| **Simulator** | The real game | [simulator.py](simulator.py) |
+| **Agent** | Builds a network move by move (extend a line, start one, add a train), always taking the best-scored move | [agent.py](src/minimetro/design/agent.py) |
+| **Heuristic** | Hand-written move score, a weighted sum of terms like segment length, bends, reach and crowding | [heuristic.py](src/minimetro/design/heuristic.py) |
+| **Survival estimate** | Queueing model that predicts how long a network lasts, in 4 ms, without playing it | [survival.py](src/minimetro/design/survival.py) |
+| **Hill climb** | Tries small edits, keeps the best, and repeats | [search.py](src/minimetro/design/search.py) |
+| **Simulator** | The real game | [simulator.py](src/minimetro/game/simulator.py) |
 
 | Step | Method | Judged by | Time per map* |
 |---|---|---|---|
@@ -113,7 +113,7 @@ the build step map by map.
 
 \* On 120 of the maps (40 per size).
 
-Raw results are in [bench_results/](bench_results/).
+Raw results are in [results/](results/).
 
 ## Getting Started
 
@@ -122,7 +122,9 @@ Developed on Python 3.13.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install pygame numpy pyyaml matplotlib torch torch_geometric
+
+# the minimetro package and its dependencies, editable
+pip install -e .
 
 # pytest and hypothesis, for the tests
 pip install -r requirements-dev.txt
@@ -130,22 +132,22 @@ pip install -r requirements-dev.txt
 
 | To | Run |
 |---|---|
-| Build a network by hand | `python play.py --level 30` |
-| Watch the AI design and play | `python run_visual.py` |
-| Step through its decisions | `python run_visual.py --heuristic --dev --search 0` |
-| Benchmark a designer | `python bench.py heuristic --polish 30 --maps 10` |
+| Build a network by hand | `python scripts/play.py --level 30` |
+| Watch the AI design and play | `python scripts/run_visual.py` |
+| Step through its decisions | `python scripts/run_visual.py --heuristic --dev --search 0` |
+| Benchmark a designer | `python scripts/bench.py heuristic --polish 30 --maps 10` |
 | Run the fast tests (~40 s) | `pytest -m "not slow"` |
-| Train the learned designer | `python main.py` |
-| Make teacher data, then imitate it | `python teach.py --maps 1000`, then `python imitate.py --out my_student` |
+| Train the learned designer | `python scripts/train.py` |
+| Make teacher data, then imitate it | `python scripts/teach.py --maps 1000`, then `python scripts/imitate.py` |
 
 Press H in a game window to see its keys.
 
 > [Note]
-> `python bench.py heuristic` rewrites `bench_results/heuristic.json`, the file every other run
+> `python scripts/bench.py heuristic` rewrites `results/heuristic.json`, the file every other run
 > is compared against. Instead run with specified maps, like `--maps 10`, as they write `heuristic_m10.json` instead.
 
-`main.py` continues training `checkpoint_v4/` and replaces `checkpoint_v4_best/` only when validation improves.
-For a fresh run, use `python main.py --out checkpoint_v5`.
+`scripts/train.py` continues training `checkpoints/v4/` and replaces `checkpoints/v4_best/` only when validation improves.
+For a fresh run, use `python scripts/train.py --out checkpoints/v5`.
 
 ## Details
 
@@ -183,30 +185,43 @@ For a fresh run, use `python main.py --out checkpoint_v5`.
 <details>
 <summary><b>Code map</b></summary>
 
-| Group | File | What it does |
+```
+src/minimetro/   the package: game/, design/, learning/, plus bench, viewer, config
+scripts/         what you run
+results/         benchmark results
+checkpoints/     trained weights
+tests/  experiments/  docs/
+```
+
+| Folder | File | What it does |
 |---|---|---|
-| Game | [config.yaml](config.yaml), [config.py](config.py) | All settings |
-| | [maps.py](maps.py) | Map generator (station count, layout, levels) |
-| | [objects.py](objects.py) | Stations, lines, trains, passengers |
-| | [simulator.py](simulator.py) | The game loop |
-| | [rules.py](rules.py) | Build moves and which are legal |
-| | [point.py](point.py), [shapes/](shapes/) | Geometry and station shapes |
-| Designer | [metrics.py](metrics.py) | Measurements of a network before play |
-| | [heuristic.py](heuristic.py) | Candidate moves and the hand-written score |
-| | [agent.py](agent.py) | Builds a network, and runs polish and search |
-| | [survival.py](survival.py) | The survival estimate |
-| | [search.py](search.py) | Edits, polish and search |
-| | [playouts.py](playouts.py) | Plays networks in parallel |
-| Learning | [model.py](model.py) | The GNN (two graph attention layers, then a move scorer) |
-| | [training.py](training.py), [main.py](main.py) | Branch and compare |
-| | [teach.py](teach.py), [imitation.py](imitation.py), [imitate.py](imitate.py) | Imitation |
-| | [ga.py](ga.py), [ga_main.py](ga_main.py) | Genetic algorithm, an older approach that evolves whole networks |
-| | [mcts.py](mcts.py) | Optional Monte Carlo look-ahead for the agent |
-| | [collect_edits.py](collect_edits.py) | Logs every edit search tries |
-| Tools | [bench.py](bench.py) | The benchmark |
-| | [visualizer.py](visualizer.py), [run_visual.py](run_visual.py), [play.py](play.py) | Viewer, AI showcase, hand-build mode |
-| | [experiments/](experiments/) | One-off studies |
-| | [tests/](tests/) | Tests. After an intended design change, regenerate the golden file with `python -m tests.test_regression`. |
+| `src/minimetro/` | [config.yaml](src/minimetro/config.yaml), [config.py](src/minimetro/config.py) | All settings and folder paths |
+| | [bench.py](src/minimetro/bench.py) | The benchmark |
+| | [viewer.py](src/minimetro/viewer.py), [showcase.py](src/minimetro/showcase.py) | Pygame viewer, and showing a designer at work |
+| `game/` | [maps.py](src/minimetro/game/maps.py) | Map generator (station count, layout, levels) |
+| | [objects.py](src/minimetro/game/objects.py), [point.py](src/minimetro/game/point.py) | Stations, lines, trains, passengers, geometry |
+| | [simulator.py](src/minimetro/game/simulator.py) | The game loop |
+| | [rules.py](src/minimetro/game/rules.py) | Build moves and which are legal |
+| `design/` | [metrics.py](src/minimetro/design/metrics.py) | Measurements of a network before play |
+| | [heuristic.py](src/minimetro/design/heuristic.py) | Candidate moves and the hand-written score |
+| | [agent.py](src/minimetro/design/agent.py) | Builds a network, and runs polish and search |
+| | [survival.py](src/minimetro/design/survival.py) | The survival estimate |
+| | [search.py](src/minimetro/design/search.py) | Edits, polish and search |
+| | [playouts.py](src/minimetro/design/playouts.py) | Plays networks in parallel |
+| | [mcts.py](src/minimetro/design/mcts.py) | Optional Monte Carlo look-ahead for the agent |
+| `learning/` | [model.py](src/minimetro/learning/model.py) | The GNN (two graph attention layers, then a move scorer) |
+| | [training.py](src/minimetro/learning/training.py) | Branch and compare |
+| | [imitation.py](src/minimetro/learning/imitation.py) | Imitation |
+| | [ga.py](src/minimetro/learning/ga.py) | Genetic algorithm, an older approach that evolves whole networks |
+| `scripts/` | [play.py](scripts/play.py) | Build a network by hand |
+| | [run_visual.py](scripts/run_visual.py) | Watch the AI design and play |
+| | [bench.py](scripts/bench.py) | Benchmark a designer |
+| | [train.py](scripts/train.py) | Train the learned designer (branch and compare) |
+| | [teach.py](scripts/teach.py), [imitate.py](scripts/imitate.py) | Make teacher designs, then train the student on them |
+| | [ga_train.py](scripts/ga_train.py) | Train the genetic algorithm |
+| | [collect_edits.py](scripts/collect_edits.py) | Log every edit search tries |
+| [tests/](tests/) | | Tests. After an intended design change, regenerate the golden file with `python -m tests.test_regression`. |
+| [experiments/](experiments/) | | One-off studies |
 
 Changing a game setting changes every result, so re-run the heuristic baseline before
 comparing with old numbers.
