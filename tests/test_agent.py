@@ -1,6 +1,7 @@
 """agent.py: the design loop, forced connections (rules.py), the viewing hook, weights."""
 
 import copy
+import random
 
 import pytest
 from hypothesis import given, strategies as st
@@ -88,3 +89,25 @@ def test_checkpoint_round_trip(tmp_path, untrained):
     sim = fresh_map(10_006)
     assert other.design(sim).actions == untrained.design(sim).actions
     assert not other.load(str(tmp_path / "missing"))
+
+
+@pytest.mark.parametrize("map_seed", [10_007, 10_008])
+def test_polish_restarts_keep_the_best_rated_climb(map_seed):
+    """The first climb is plain polish; more climbs can only raise the estimate kept."""
+    from search import spec_of, valid
+    agent, sim0 = heuristic_agent(), fresh_map(map_seed)
+    design = agent.design(sim0).sim
+    one, one_stats = agent.polish(sim0, design, rounds=5, rng=random.Random(0))
+    many, many_stats = agent.polish(sim0, design, rounds=5, restarts=4, rng=random.Random(0))
+    assert valid(spec_of(many), sim0)
+    assert many_stats["start"] == one_stats["start"] and many_stats["final"] >= one_stats["final"]
+    if many_stats["climb"] == 0:
+        assert spec_of(many) == spec_of(one)
+
+
+def test_noisy_design_differs_but_serves_every_station():
+    from search import spec_of
+    agent, sim0 = heuristic_agent(), fresh_map(10_009)
+    noisy = agent.noisy_design(sim0, random.Random(1))
+    assert {id(s) for l in noisy.lines for s in l.stations} == {id(s) for s in noisy.stations}
+    assert spec_of(noisy) != spec_of(agent.design(sim0).sim)

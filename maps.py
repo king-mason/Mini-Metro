@@ -82,12 +82,26 @@ class Level:
         return MapSpec(self.stations, self.layouts[map_seed % len(self.layouts)])
 
 
+# What a learner trains on. The test suite also has the rest, to measure generalization.
+TRAIN_SIZES = (30, 35)                    # 40 stations is held out
+TRAIN_LAYOUTS = ("uniform", "clusters")   # corridor is held out
+
 LEVELS = {
     "classic": Level(NUM_STATIONS, ("uniform",)),   # the original maps
-    "30": Level(30),     # bench levels: sized so strong designs rarely last to the cap
+    "30": Level(30),     # test levels: sized so strong designs rarely last to the cap
     "35": Level(35),
     "40": Level(40),
+    "train30": Level(30, TRAIN_LAYOUTS),            # training and validation maps
+    "train35": Level(35, TRAIN_LAYOUTS),
 }
+
+
+def novelty(spec: MapSpec) -> str:
+    """How a map differs from the training maps: "seen", "new size", "new layout" or
+    "new size+layout"."""
+    new = [what for what, seen in (("size", spec.stations in TRAIN_SIZES), ("layout", spec.layout in TRAIN_LAYOUTS))
+           if not seen]
+    return "new " + "+".join(new) if new else "seen"
 
 
 def generate(spec: MapSpec, rng) -> list[Station]:

@@ -5,6 +5,7 @@ Training lives in training.py, play-outs in playouts.py, edit search in search.p
 """
 
 import copy
+import json
 import math
 import os
 import random
@@ -13,15 +14,17 @@ from dataclasses import dataclass
 import torch
 
 from config import MAX_LINES, MAX_TRAINS
-from heuristic import K_CANDIDATES, PRIOR, get_candidate_actions, structural_reward
+from heuristic import K_CANDIDATES, PRIOR, PRIOR_TERMS, get_candidate_actions, prior_terms, structural_reward
 from mcts import MCTS
-from metrics import NEIGHBOR_K
+from metrics import NEIGHBOR_K, neighbor_sets
 from model import (ACTION_AUX_DIM, IDENTITY_AUG, STATE_FEAT_SIZE, GNNStateEncoder, PairScoringNet,
                    action_aux_features, action_station_indices, build_graph)
 from playouts import CAP, Playouts
 from rules import NOOP, ActionType, action_label, apply_action, connect_isolated
 from simulator import MiniMetroSim
 
+KICK_EDITS = 6       # random edits that restart a polish climb elsewhere
+BUILD_NOISE = 1.0    # Gumbel noise on move scores, in prior units, for a rebuilt start
 
 @dataclass
 class DesignResult:
@@ -63,6 +66,8 @@ class Agent:
 
         self.state_encoder = GNNStateEncoder()
         self.q_net = PairScoringNet(STATE_FEAT_SIZE, STATE_FEAT_SIZE, ACTION_AUX_DIM)
+        # learned reweighting of the prior's terms (imitation); all 0 = the heuristic's prior
+        self.log_term_weights = torch.nn.Parameter(torch.zeros(len(PRIOR_TERMS)))
         self.mcts = MCTS(self.scores, self.prior, self.candidates, mcts_sims, mcts_c, mcts_horizon) if mcts_sims else None
 
     def close(self):
@@ -74,7 +79,14 @@ class Agent:
         return get_candidate_actions(sim, self.k, phase=phase, neighbor_k=self.k_neighbors)
 
     def prior(self, sim: MiniMetroSim, action: tuple) -> float:
-        return self.prior_scale * structural_reward(sim, action)
+        if not self.log_term_weights.any():
+            return self.prior_scale * structural_reward(sim, action)
+        weights = self.log_term_weights.detach().exp().tolist()
+        return self.prior_scale * sum(w * t for w, t in zip(weights, prior_terms(sim, action)))
+
+    def term_weights(self) -> dict[str, float]:
+        """How much the agent trusts each term of the prior (1 = as hand-written)."""
+        return dict(zip(PRIOR_TERMS, self.log_term_weights.detach().exp().tolist()))
 
     def prior_and_q(self, sim: MiniMetroSim, phase: str, candidates: list) -> tuple[dict, dict]:
         """({action: prior}, {action: Q}) for the candidates, from one state encoding."""
@@ -123,13 +135,15 @@ class Agent:
     # ---- design ----
 
     def design(self, sim0: MiniMetroSim, plan: list = (), chooser=None, follow: dict | None = None,
-               on_step=None) -> DesignResult:
+               guide=None, on_step=None) -> DesignResult:
         """Build a design on a copy of sim0: lines, forced connections, then trains.
 
         plan: replay these first decisions. chooser(sim, phase, candidates) -> action makes the
         next one instead of the policy. follow = {"lines": [...], "trains": [...]}: later
         decisions take the next listed action that is still a candidate, then stop building
-        lines / fall back to the policy once a list runs out.
+        lines / fall back to the policy once a list runs out. guide(sim, phase, candidates) ->
+        action or None steers every other decision (None: the policy decides); its action
+        need not be a candidate.
 
         on_step(sim, action, label, scored) is called before each action is applied, for
         viewing; `scored` is explain()'s list, or None for a forced connection. Returning
@@ -164,6 +178,8 @@ class Agent:
                 action = chooser(sim, phase, candidates)
             else:
                 action = followed(phase, candidates) if queues is not None else None
+                if action is None and guide is not None:
+                    action = guide(sim, phase, candidates)
                 if action is None:
                     action = self.select_action(sim, phase, candidates)
             actions.append(action)
@@ -199,20 +215,47 @@ class Agent:
                        on_round=on_round, record=record,
                        prescreen=SurvivalModel(sim0).log_ticks if self.screen_edits else None)
 
-    def polish(self, sim0: MiniMetroSim, design: MiniMetroSim, rounds: int = 30,
+    def noisy_design(self, sim0: MiniMetroSim, rng: random.Random, noise: float = BUILD_NOISE) -> MiniMetroSim:
+        """A design built with Gumbel noise of scale `noise` on every move's score: a
+        different network that is still a sensible one."""
+        def guide(sim, phase, candidates):
+            scores = self.scores(sim, phase, candidates)
+            return max(candidates, key=lambda a: scores[a] - noise * math.log(-math.log(rng.random() + 1e-12)))
+        return self.design(sim0, guide=guide).sim
+
+    def polish(self, sim0: MiniMetroSim, design: MiniMetroSim, rounds: int = 30, restarts: int = 1,
                rng: random.Random | None = None, on_round=None) -> tuple[MiniMetroSim, dict]:
         """Hill-climb on the survival estimate alone (search.polish): no play-outs.
-        stats["start"] / ["final"] are estimated ticks."""
-        from search import polish
+
+        Each climb ends on a different local top. With restarts > 1 it climbs again from
+        other starts (the same design, a kicked copy, a noisy rebuild, in turn) and keeps
+        the result the estimate rates best. stats["start"] / ["final"]: estimated ticks of
+        `design` / the result; stats["climb"]: which climb was kept (0 = the first)."""
+        from search import build, kick, polish, spec_of
         from survival import SurvivalModel
+
+        rng = rng or self.rng
+        value = SurvivalModel(sim0).log_ticks
+        nbrs = neighbor_sets(sim0)
+        report = None if on_round is None else lambda r, n, sim, stats: on_round(r, n, sim, in_ticks(stats))
 
         def in_ticks(stats):
             return {**stats, "start": math.exp(stats["start"]), "final": math.exp(stats["final"])}
 
-        report = None if on_round is None else lambda r, n, sim, stats: on_round(r, n, sim, in_ticks(stats))
-        design, stats = polish(sim0, design, SurvivalModel(sim0).log_ticks, rounds=rounds,
-                               rng=rng or self.rng, on_round=report)
-        return design, in_ticks(stats)
+        def start(k):
+            kind = "same" if k == 0 else ("same", "kick", "noisy")[(k - 1) % 3]
+            if kind == "kick":
+                return build(sim0, kick(spec_of(design), sim0, nbrs, rng, KICK_EDITS))
+            return self.noisy_design(sim0, rng) if kind == "noisy" else design
+
+        best, first_start = None, None
+        for k in range(restarts):
+            result, stats = polish(sim0, start(k), value, rounds=rounds, rng=rng, on_round=report)
+            first_start = stats["start"] if first_start is None else first_start
+            if best is None or stats["final"] > best[1]["final"]:
+                best = (result, {**stats, "climb": k})
+        result, stats = best
+        return result, in_ticks({**stats, "start": first_start, "restarts": restarts})
 
     # ---- weights ----
 
@@ -220,10 +263,13 @@ class Agent:
         os.makedirs(path, exist_ok=True)
         torch.save(self.state_encoder.state_dict(), os.path.join(path, "state_encoder.pth"))
         torch.save(self.q_net.state_dict(), os.path.join(path, "q_net.pth"))
+        with open(os.path.join(path, "settings.json"), "w") as f:
+            json.dump({"k_candidates": self.k, "override_margin": self.override_margin,
+                       "log_term_weights": self.log_term_weights.tolist()}, f)
 
     def load(self, path: str) -> bool:
-        """Load weights saved by save(). False (and nothing loaded) if they are missing or
-        from a different architecture."""
+        """Load weights saved by save(), and the candidate count and margin they were trained
+        with. False (and nothing loaded) if they are missing or from a different architecture."""
         enc_path, q_path = os.path.join(path, "state_encoder.pth"), os.path.join(path, "q_net.pth")
         if not (os.path.exists(enc_path) and os.path.exists(q_path)):
             return False
@@ -236,4 +282,11 @@ class Agent:
             return False
         self.state_encoder.load_state_dict(encoder.state_dict())   # in place: optimizers keep their parameters
         self.q_net.load_state_dict(q_net.state_dict())
+        settings_path = os.path.join(path, "settings.json")
+        if os.path.exists(settings_path):
+            with open(settings_path) as f:
+                settings = json.load(f)
+            self.k, self.override_margin = settings["k_candidates"], settings["override_margin"]
+            with torch.no_grad():
+                self.log_term_weights.copy_(torch.tensor(settings.get("log_term_weights", [0.0] * len(PRIOR_TERMS))))
         return True

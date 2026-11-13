@@ -112,34 +112,45 @@ def congestion_cost(length: float, n_trains: int) -> float:
     return PRIOR.congestion_penalty * max(0.0, min(rho, RHO_CLAMP) - 1.0)
 
 
-def joining_reward(sim: MiniMetroSim, a: int, b: int, d: float) -> float:
-    """Reward for a new segment a-b of length d: connecting stations on no line (awkward ones
-    especially) and making demand reachable, minus the cost of the track."""
+# The prior's score is a sum of these terms (penalties negative); a student can reweight them.
+PRIOR_TERMS = ("isolation", "reach", "scarcity", "track", "bend", "congestion", "relief")
+
+
+def joining_terms(sim: MiniMetroSim, a: int, b: int, d: float) -> tuple[float, float, float, float]:
+    """(isolation, reach, scarcity, track) for a new segment a-b of length d: connecting
+    stations on no line (awkward ones especially), making demand reachable, and the cost
+    of the track."""
     isolated = [s for s in (a, b) if not on_a_line(sim, s)]
     gain_a, gain_b, coverage = expected_demand_gain(sim, a, b)
     reach = PRIOR.reach_demand * (gain_a + gain_b) + PRIOR.reach_coverage * coverage
     scarcity = sum(PRIOR.scarcity_bonus * close_neighbor_scarcity(sim, s) for s in isolated)
-    return PRIOR.isolation_bonus * len(isolated) + reach + scarcity - connection_cost(d)
+    return PRIOR.isolation_bonus * len(isolated), reach, scarcity, -connection_cost(d)
 
 
-def structural_reward(sim: MiniMetroSim, action: tuple) -> float:
-    """The prior's score for `action`, read against the state before it is applied."""
+def prior_terms(sim: MiniMetroSim, action: tuple) -> tuple[float, ...]:
+    """The prior's score for `action` in parts (PRIOR_TERMS), read against the state before
+    it is applied."""
     kind = action[0]
     if kind == ActionType.EXTEND_LINE:
         _, li, end, new = action
         line = sim.lines[li]
         tip = sim.stations.index(line.stations[end])
         d = line.stations[end].pos.get_distance(sim.stations[new].pos)
-        return (joining_reward(sim, new, tip, d) - PRIOR.bend_penalty * bend_cost(sim, action)
-                - congestion_cost(line.length() + d, len(line.trains)))
+        return (*joining_terms(sim, new, tip, d), -PRIOR.bend_penalty * bend_cost(sim, action),
+                -congestion_cost(line.length() + d, len(line.trains)), 0.0)
     if kind == ActionType.NEW_LINE:
         _, a, b = action
         d = sim.stations[a].pos.get_distance(sim.stations[b].pos)
-        return joining_reward(sim, a, b, d) - congestion_cost(d, 1)
+        return (*joining_terms(sim, a, b, d), 0.0, -congestion_cost(d, 1), 0.0)
     if kind == ActionType.ADD_TRAIN:
         # how much the train relieves the line's worst load factor
         line = sim.lines[action[1]]
         relief = (endpoint_load_factor(line.length(), len(line.trains))
                   - endpoint_load_factor(line.length(), len(line.trains) + 1))
-        return PRIOR.congestion_relief * min(RHO_CLAMP if relief == float("inf") else relief, RHO_CLAMP)
-    return 0.0
+        return (0.0,) * 6 + (PRIOR.congestion_relief * min(RHO_CLAMP if relief == float("inf") else relief, RHO_CLAMP),)
+    return (0.0,) * len(PRIOR_TERMS)
+
+
+def structural_reward(sim: MiniMetroSim, action: tuple) -> float:
+    """The prior's score for `action`: its terms added in order."""
+    return sum(prior_terms(sim, action))

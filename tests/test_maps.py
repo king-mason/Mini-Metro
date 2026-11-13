@@ -6,7 +6,7 @@ import pytest
 from hypothesis import given, strategies as st
 
 from bench import suite
-from maps import LAYOUTS, LEVELS, MapSpec, generate, grid_points
+from maps import LAYOUTS, LEVELS, TRAIN_LAYOUTS, TRAIN_SIZES, MapSpec, generate, grid_points, novelty
 from simulator import MiniMetroSim
 
 specs = st.builds(MapSpec, st.integers(2, 40), st.sampled_from(list(LAYOUTS)), st.integers(1, 12))
@@ -38,6 +38,17 @@ def test_too_many_stations_are_refused():
 
 
 def test_bench_levels_use_separate_maps():
-    maps = suite("levels", 50)
+    maps = suite("test", 50)
     assert len({m.seed for m in maps}) == len(maps)
+    assert not {m.seed for m in maps} & {m.seed for m in suite("val", 50)}
     assert len(suite("classic")) == 100 and all(m.spec == MapSpec() for m in suite("classic"))
+
+
+def test_validation_maps_look_like_training_maps():
+    specs = [m.spec for m in suite("val", 20)]
+    assert {s.stations for s in specs} == set(TRAIN_SIZES) and {s.layout for s in specs} == set(TRAIN_LAYOUTS)
+    assert {novelty(s) for s in specs} == {"seen"}
+
+
+def test_test_suite_has_every_kind_of_novelty():
+    assert {novelty(m.spec) for m in suite("test", 6)} == {"seen", "new size", "new layout", "new size+layout"}

@@ -12,7 +12,7 @@ from hypothesis import given, strategies as st
 
 from bench import BENCH_SEEDS
 from metrics import neighbor_sets
-from search import Spec, build, improve, polish, propose, spec_of, valid
+from search import Spec, build, improve, kick, polish, propose, spec_of, valid
 from simulator import run_playout
 from tests.helpers import crossing_pairs, fresh_map, heuristic_design
 
@@ -205,3 +205,11 @@ def test_polish_only_climbs(map_index, seed):
     assert stats["final"] == math.log(trains(spec_of(result)))
     flat, flat_stats = polish(base, design, lambda spec: 0.0, rounds=4, rng=random.Random(seed))
     assert spec_of(flat) == spec_of(design) and flat_stats["accepted"] == {}
+
+
+@given(map_indices, seeds)
+def test_kick_makes_a_different_valid_design(map_index, seed):
+    base, design = map_and_design(map_index)
+    start = spec_of(design)
+    kicked = kick(start, base, neighbor_sets(base), random.Random(seed), 6)
+    assert valid(kicked, base) and kicked != start

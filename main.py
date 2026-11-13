@@ -1,10 +1,15 @@
 """Train the design agent (training.py), validating against the heuristic.
 
-Every episode is a new map. Every EVAL_EVERY episodes the weights are scored on VAL_MAPS
-against the heuristic, and the best are kept in BEST_CKPT. VAL_MAPS are separate from the
-training and bench maps, so picking the best checkpoint doesn't inflate the bench.
+    python main.py                         # continue training checkpoint_v4/
+    python main.py --out checkpoint_v5     # a fresh run in a new folder
+
+Every episode is a new map. Every EVAL_EVERY episodes the weights are saved to --out and
+scored on VAL_MAPS against the heuristic; the best are kept in <out>_best. VAL_MAPS are
+separate from the training and bench maps, so picking the best checkpoint doesn't inflate
+the bench.
 """
 
+import argparse
 import math
 import random
 
@@ -18,8 +23,7 @@ from training import Trainer
 NUM_EPISODES = 500
 ROLLING_WINDOW = 50
 EVAL_EVERY = 25
-CKPT = "checkpoint_v4"
-BEST_CKPT = "checkpoint_v4_best"
+DEFAULT_CKPT = "checkpoint_v4"
 VAL_MAPS = [bench.BenchMap("classic", m) for m in range(20_000, 20_040)]
 VAL_SEEDS = list(range(3))
 WORKERS = bench.default_workers()
@@ -58,7 +62,7 @@ def plot(history: list[dict], evals: list[tuple[int, dict]], path: str = "traini
     plt.show()
 
 
-def train(trainer: Trainer, num_episodes: int, ckpt: str = CKPT, best_ckpt: str = BEST_CKPT):
+def train(trainer: Trainer, num_episodes: int, ckpt: str, best_ckpt: str):
     """Run training episodes on fresh maps, validating every EVAL_EVERY. Returns (history, evals)."""
     heuristic_val = bench.run(bench.PolicySpec("heuristic"), VAL_MAPS, VAL_SEEDS, workers=WORKERS)
     print(bench.report("heuristic on validation maps", heuristic_val))
@@ -85,11 +89,17 @@ def train(trainer: Trainer, num_episodes: int, ckpt: str = CKPT, best_ckpt: str 
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--out", default=DEFAULT_CKPT,
+                        help="checkpoint folder; training resumes from it if it exists")
+    args = parser.parse_args()
+    ckpt, best_ckpt = args.out, args.out + "_best"
+
     agent = Agent(workers=WORKERS)
     trainer = Trainer(agent)
-    trainer.load(CKPT)
+    trainer.load(ckpt)
     try:
-        history, evals = train(trainer, NUM_EPISODES)
+        history, evals = train(trainer, NUM_EPISODES, ckpt, best_ckpt)
     finally:
         agent.close()
 
@@ -98,10 +108,10 @@ def main():
     # ---- final visualized run with the best checkpoint (more: python run_visual.py) ----
     from run_visual import watch
     from visualizer import Visualizer
-    agent.load(BEST_CKPT)
+    agent.load(best_ckpt)
     vis = Visualizer()
     try:
-        watch(agent, vis, [random.randrange(10_000)], policy=BEST_CKPT)
+        watch(agent, vis, [random.randrange(10_000)], policy=best_ckpt)
     except SystemExit:
         pass
     finally:

@@ -5,11 +5,15 @@
     python bench.py agent --ckpt checkpoint_v4_best --mcts 30
     python bench.py heuristic --search 10 --maps 20    # then polished by play-out search
     python bench.py heuristic --polish 30              # then polished by the survival estimate
+    python bench.py heuristic --polish 30 --search 10 --maps 40 --name teacher
     python bench.py heuristic --suite classic          # the original 20-station maps
 
-Every run plays the same held-out maps and passenger seeds: --maps N per difficulty level
-(maps.LEVELS). Results go to bench_results/<name>.json and are compared, map by map, with
-bench_results/heuristic.json (classic suite: bench_results/classic/).
+Suites: "test" (default) has --maps N maps per size, all layouts, including sizes and
+layouts no learner trains on; "val" is for tuning, on training-like maps; "classic" is the
+original bench. Every run of a suite plays the same maps and passenger seeds. Results go to
+bench_results/[suite/]<name>.json and are compared, map by map, with that folder's
+heuristic.json, and on the test suite with teacher.json as share of the teacher's gain.
+The default name ends in _m<N> when --maps is given, so a partial run never replaces a full one.
 """
 
 import argparse
@@ -26,14 +30,17 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from config import HEIGHT, MAX_TRAINS, WIDTH
-from maps import LEVELS, MapSpec
-from playouts import CAP
+from maps import LEVELS, MapSpec, novelty
 from point import Point
 from simulator import MiniMetroSim, run_playout
 
-BENCH_LEVELS = ("30", "35", "40")         # keys of maps.LEVELS, easiest first
+# Map seeds: training 0..9999 (up to 1000 per level), test 10_000.., validation 20_000.. .
+SUITE_LEVELS = {"test": ("30", "35", "40"), "val": ("train30", "train35"),
+                "train": ("train30", "train35")}                            # keys of maps.LEVELS
+SUITE_SEED_START = {"test": 10_000, "val": 20_000, "train": 0}
 LEVEL_MAPS = 100                          # maps per level
 CLASSIC_MAPS = list(range(10_000, 10_100))
+CAPS = {"test": 10_000, "val": 10_000, "classic": 6_000}   # classic keeps its historical cap
 BENCH_SEEDS = list(range(5))              # passenger seeds, shared by every run
 RESULTS_DIR = "bench_results"
 
@@ -51,14 +58,16 @@ class BenchMap:
         return MiniMetroSim(self.seed, map_spec=self.spec)
 
 
-def suite(name: str = "levels", per_level: int | None = None) -> list[BenchMap]:
-    """The bench maps, held out (training uses seeds 0..9999). "levels": the first
-    `per_level` maps of each level, each level its own block of seeds. "classic": the
-    original 20-station maps."""
+def suite(name: str = "test", per_level: int | None = None) -> list[BenchMap]:
+    """A suite's maps: the first `per_level` of each level, each level its own block of
+    seeds ("classic": the original 20-station maps)."""
     if name == "classic":
         return [BenchMap("classic", m) for m in CLASSIC_MAPS[:per_level]]
-    return [BenchMap(level, 10_000 + 1_000 * j + i)
-            for j, level in enumerate(BENCH_LEVELS) for i in range(per_level or LEVEL_MAPS)]
+    start = SUITE_SEED_START[name]
+    if name == "train" and (per_level or LEVEL_MAPS) > 1_000:
+        raise ValueError("at most 1000 training maps per level")
+    return [BenchMap(level, start + 1_000 * j + i)
+            for j, level in enumerate(SUITE_LEVELS[name]) for i in range(per_level or LEVEL_MAPS)]
 
 
 @dataclass
@@ -67,6 +76,7 @@ class PolicySpec:
     ckpt: str | None = None
     mcts_sims: int = 0
     polish_rounds: int = 0      # then hill-climb on the survival estimate
+    polish_restarts: int = 1    # climbs per map; the one the estimate rates best is kept
     search_rounds: int = 0      # then play-out search
     screen_edits: bool = True   # search plays the edits the survival estimate rates best
 
@@ -96,7 +106,8 @@ def evaluate_map(agent, spec: PolicySpec, bench_map: BenchMap, seeds: list[int],
     result = agent.design(sim0)
     design, polish, search = result.sim, None, None
     if spec.polish_rounds:
-        design, polish = agent.polish(sim0, design, rounds=spec.polish_rounds, rng=random.Random(map_seed))
+        design, polish = agent.polish(sim0, design, rounds=spec.polish_rounds, restarts=spec.polish_restarts,
+                                      rng=random.Random(map_seed))
     if spec.search_rounds:
         design, search = agent.improve(sim0, design, rounds=spec.search_rounds, seed_rng=search_seed_rng(map_seed),
                                        rng=random.Random(map_seed))
@@ -104,6 +115,7 @@ def evaluate_map(agent, spec: PolicySpec, bench_map: BenchMap, seeds: list[int],
     return {
         "level": bench_map.level,
         "layout": bench_map.spec.layout,
+        "novelty": novelty(bench_map.spec),
         "map": map_seed,
         "ticks": [t for t, _ in runs],
         "delivered": [d for _, d in runs],
@@ -161,9 +173,9 @@ def invariance(spec: PolicySpec, maps: list[BenchMap], workers: int | None = Non
     }
 
 
-def run(spec: PolicySpec, maps: list[BenchMap] | None = None, seeds=BENCH_SEEDS, cap: int = CAP,
+def run(spec: PolicySpec, maps: list[BenchMap] | None = None, seeds=BENCH_SEEDS, cap: int = CAPS["test"],
         workers: int | None = None) -> dict:
-    """Evaluate `spec` on every map (default: the levels suite). workers=0 runs in this
+    """Evaluate `spec` on every map (default: the test suite). workers=0 runs in this
     process (for debugging)."""
     maps, seeds = list(maps or suite()), list(seeds)
     workers = default_workers() if workers is None else workers
@@ -225,8 +237,25 @@ def compare(results: dict, reference: dict, where=None) -> dict:
     }
 
 
+def share_of_gain(results: dict, teacher: dict, base: dict, where=None) -> dict:
+    """How much of the teacher's gain over `base` a run gets: mean log(run / base) over
+    mean log(teacher / base), on maps all three share. 1 = as good as the teacher. The CI
+    resamples maps."""
+    a, t, b = map_scores(results, where), map_scores(teacher), map_scores(base)
+    common = sorted(set(a) & set(t) & set(b))
+    if not common:
+        return {"n": 0, "share": float("nan"), "lo": float("nan"), "hi": float("nan")}
+    gain = np.log([a[m] / b[m] for m in common])
+    teacher_gain = np.log([t[m] / b[m] for m in common])
+    rng = np.random.default_rng(0)
+    picks = rng.integers(0, len(common), size=(2000, len(common)))
+    boot = gain[picks].mean(axis=1) / teacher_gain[picks].mean(axis=1)
+    return {"n": len(common), "share": float(gain.mean() / teacher_gain.mean()),
+            "lo": float(np.percentile(boot, 2.5)), "hi": float(np.percentile(boot, 97.5))}
+
+
 def results_dir(suite_name: str) -> str:
-    return RESULTS_DIR if suite_name == "levels" else os.path.join(RESULTS_DIR, suite_name)
+    return RESULTS_DIR if suite_name == "test" else os.path.join(RESULTS_DIR, suite_name)
 
 
 def save(results: dict, name: str, directory: str = RESULTS_DIR) -> str:
@@ -242,7 +271,8 @@ def load(path: str) -> dict:
         return json.load(f)
 
 
-def report(name: str, results: dict, reference: dict | None = None, reference_name: str = "") -> str:
+def report(name: str, results: dict, reference: dict | None = None, reference_name: str = "",
+           teacher: dict | None = None) -> str:
     s = summarize(results)
     lines = [
         f"{name}: {s['maps']} maps x {len(results['seeds'])} passenger seeds, cap {results['cap']} ticks",
@@ -256,11 +286,16 @@ def report(name: str, results: dict, reference: dict | None = None, reference_na
         lines.append(
             f"  vs {reference_name}: x{c['ratio']:.3f} geometric mean [95% CI {c['lo']:.3f}, {c['hi']:.3f}]"
             f"   better on {c['wins']:.0%}, worse on {c['losses']:.0%} of {c['n']} maps")
-    for field in ("level", "layout"):
+    teacher = teacher if reference is not None else None
+    if teacher is not None:
+        g = share_of_gain(results, teacher, reference)
+        lines.append(f"  share of the teacher's gain: {g['share']:.0%} [{g['lo']:.0%}, {g['hi']:.0%}] on {g['n']} maps")
+    for field in ("level", "layout", "novelty"):
         values = sorted({r[field] for r in results["maps"] if field in r}, key=lambda v: (len(v), v))
         if len(values) < 2:
             continue
-        lines.append(f"  by {field:7s} maps   mean  reached cap" + (f"   vs {reference_name}" if reference else ""))
+        lines.append(f"  by {field:7s} maps   mean  reached cap" + (f"   vs {reference_name}" if reference else "")
+                     + ("              teacher's gain" if teacher is not None else ""))
         for value in values:
             def where(r):
                 return r.get(field) == value
@@ -269,18 +304,24 @@ def report(name: str, results: dict, reference: dict | None = None, reference_na
             if reference is not None:
                 c = compare(results, reference, where)
                 row += f"     x{c['ratio']:.3f} [{c['lo']:.3f}, {c['hi']:.3f}]" if c["n"] else "     (not in reference)"
+            if teacher is not None:
+                g = share_of_gain(results, teacher, reference, where)
+                row += f"   {g['share']:4.0%} [{g['lo']:.0%}, {g['hi']:.0%}]" if g["n"] else ""
             lines.append(row)
     return "\n".join(lines)
 
 
-def default_name(spec: PolicySpec) -> str:
+def default_name(spec: PolicySpec, maps: int | None = None) -> str:
+    """Results name for a run; `maps` (per level) marks a partial run."""
     name = "heuristic" if spec.kind == "heuristic" else os.path.basename(os.path.normpath(spec.ckpt))
     if spec.mcts_sims:
         name += f"_mcts{spec.mcts_sims}"
     if spec.polish_rounds:
-        name += f"_polish{spec.polish_rounds}"
+        name += f"_polish{spec.polish_rounds}" + (f"x{spec.polish_restarts}" if spec.polish_restarts > 1 else "")
     if spec.search_rounds:
         name += f"_{'' if spec.screen_edits else 'plain'}search{spec.search_rounds}"
+    if maps:
+        name += f"_m{maps}"
     return name
 
 
@@ -290,8 +331,10 @@ def main():
     parser.add_argument("--ckpt", default="checkpoint_v4_best", help="checkpoint dir for policy=agent")
     parser.add_argument("--mcts", type=int, default=0, help="MCTS simulations per decision (0 = greedy)")
     parser.add_argument("--name", help="results name (default: derived from the policy)")
-    parser.add_argument("--suite", choices=["levels", "classic"], default="levels")
+    parser.add_argument("--suite", choices=["test", "val", "classic"], default="test")
     parser.add_argument("--maps", type=int, help="use the first N maps of each level")
+    parser.add_argument("--teacher", help="results to measure share of gain against "
+                                          "(default: the suite's teacher.json)")
     parser.add_argument("--workers", type=int, default=default_workers())
     parser.add_argument("--compare", help="results file to compare against, paired by map "
                                           "(default: the suite's heuristic.json)")
@@ -299,6 +342,7 @@ def main():
                         help="also check whether mirrored maps get the same design")
     parser.add_argument("--polish", type=int, default=0, metavar="ROUNDS",
                         help="polish each design on the survival estimate (no play-outs)")
+    parser.add_argument("--restarts", type=int, default=1, help="polish climbs per map, keeping the best-rated")
     parser.add_argument("--search", type=int, default=0, metavar="ROUNDS",
                         help="then polish it by play-out search (slow)")
     parser.add_argument("--plain-search", action="store_true",
@@ -306,18 +350,22 @@ def main():
     args = parser.parse_args()
 
     spec = PolicySpec(args.policy, args.ckpt if args.policy == "agent" else None, args.mcts,
-                      polish_rounds=args.polish, search_rounds=args.search, screen_edits=not args.plain_search)
-    name = args.name or default_name(spec)
+                      polish_rounds=args.polish, polish_restarts=args.restarts,
+                      search_rounds=args.search, screen_edits=not args.plain_search)
+    name = args.name or default_name(spec, args.maps)
     maps = suite(args.suite, args.maps)
     directory = results_dir(args.suite)
     compare_path = args.compare or os.path.join(directory, "heuristic.json")
+    teacher_path = args.teacher or os.path.join(directory, "teacher.json")
     start = time.time()
-    results = run(spec, maps=maps, workers=args.workers)
+    results = run(spec, maps=maps, cap=CAPS[args.suite], workers=args.workers)
     path = save(results, name, directory)
-    reference = None
+    reference = teacher = None
     if os.path.exists(compare_path) and os.path.abspath(compare_path) != os.path.abspath(path):
         reference = load(compare_path)
-    print(report(name, results, reference, os.path.splitext(os.path.basename(compare_path))[0]))
+    if os.path.exists(teacher_path) and os.path.abspath(teacher_path) != os.path.abspath(path):
+        teacher = load(teacher_path)
+    print(report(name, results, reference, os.path.splitext(os.path.basename(compare_path))[0], teacher))
     if args.invariance:
         inv = invariance(spec, maps=maps, workers=args.workers)
         print(f"  same design on mirrored map: left-right {inv['left_right']:.0%}, "

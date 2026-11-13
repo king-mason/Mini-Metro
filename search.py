@@ -4,6 +4,7 @@ shift a line end, reverse a stretch of a line), kept when they help.
 improve: judge edits by real play-outs on fresh seeds each round; keep the best one only if
     it beats the current design by more than the noise.
 polish:  hill-climb on a cheap estimate (survival.py) alone, no play-outs.
+kick:    a few random edits, to restart a climb somewhere else.
 """
 
 from __future__ import annotations
@@ -131,6 +132,16 @@ def draw_edits(spec: Spec, base: MiniMetroSim, nbrs: list[set[int]], rng: random
         if p is not None and all(p[0] != q[0] for q in edits):
             edits.append(p)
     return edits
+
+
+def kick(spec: Spec, base: MiniMetroSim, nbrs: list[set[int]], rng: random.Random, edits: int) -> Spec:
+    """`spec` after `edits` random edits, kept whether they help or not: a new place to
+    start a climb from."""
+    for _ in range(edits):
+        drawn = draw_edits(spec, base, nbrs, rng, 1, attempts=50)
+        if drawn:
+            spec = drawn[0][0]
+    return spec
 
 
 def improve(base: MiniMetroSim, start: MiniMetroSim, score, rounds: int = 10, batch: int = 8,
